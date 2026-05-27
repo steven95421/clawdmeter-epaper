@@ -1,0 +1,22 @@
+# Build artefacts
+firmware/.pio/
+firmware/.vscode/
+firmware/.pioenvs/
+*.pyc
+__pycache__/
+
+# Daemon: ship the source, not the built bundle / venv
+daemon/.venv/
+daemon/ClawdmeterDaemon.app/
+daemon/_state_test.py
+daemon/_basic_test.py
+
+# macOS noise
+.DS_Store
+
+# Editor noise
+.vscode/
+.idea/
+
+# Logs
+*.log
