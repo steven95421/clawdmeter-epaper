@@ -19,6 +19,7 @@
 constexpr int VBAT_PWR_PIN = 17;
 constexpr int PWR_BUTTON_PIN  = 18;   // active LOW, hold >=1s to soft-shutdown
 constexpr int BOOT_BUTTON_PIN = 0;    // active LOW, short press = redraw EPD
+constexpr int BAT_ADC_PIN     = 4;    // VBAT_ADC, VBAT = ADC × 2 via on-board divider
 
 // Latest usage state pushed by the daemon — kept so the BOOT button can
 // trigger an EPD redraw without waiting for the next BLE write.
@@ -66,6 +67,11 @@ void setup() {
     // so an open-circuit reads HIGH (idle).
     pinMode(PWR_BUTTON_PIN,  INPUT_PULLUP);
     pinMode(BOOT_BUTTON_PIN, INPUT_PULLUP);
+
+    // Battery ADC: 12-bit, 11 dB attenuation so the full ~0-3.3 V swing
+    // (after the on-board /2 divider) maps to 0-4095.
+    analogReadResolution(12);
+    analogSetPinAttenuation(BAT_ADC_PIN, ADC_11db);
 
     Serial.begin(115200);
     delay(200);
@@ -130,9 +136,56 @@ static void poll_buttons(uint32_t now) {
     }
 }
 
+// Sample VBAT every 5 s, smooth with an average over 16 reads, convert to
+// a rough LiPo percentage. Linear fit between 3.30 V (empty) and 4.20 V
+// (full) is close enough for a 10 %-bucket display — no point in modelling
+// the actual discharge curve when the only consumer is a 1-decimal-digit
+// glyph on a panel that only updates every few minutes.
+static int g_battery_bucket = -1;
+static uint32_t s_last_battery_sample_ms = 0;
+
+static int sample_battery_pct() {
+    // Use the Arduino-ESP32 calibrated reading (mV) so we don't have to
+    // deal with the ESP32-S3 ADC's non-linear compression at high voltages
+    // under 11 dB attenuation. Returns the divider's tap voltage; the
+    // board halves VBAT through a 1:1 resistor divider so vbat = tap × 2.
+    constexpr int N = 16;
+    long sum_mv = 0;
+    for (int i = 0; i < N; i++) sum_mv += analogReadMilliVolts(BAT_ADC_PIN);
+    float tap_v = (sum_mv / (float)N) / 1000.0f;
+    float vbat  = tap_v * 2.0f;
+    Serial.printf("[bat] tap=%.3fV vbat=%.3fV\n", tap_v, vbat);
+    // Linear LiPo fit: 3.30 V = 0%, 4.20 V = 100%.
+    int pct = (int)((vbat - 3.30f) / (4.20f - 3.30f) * 100.0f);
+    if (pct < 0)   pct = 0;
+    if (pct > 100) pct = 100;
+    return pct;
+}
+
+static void poll_battery(uint32_t now) {
+    constexpr uint32_t SAMPLE_INTERVAL_MS = 5000;
+    if (g_battery_bucket >= 0 && now - s_last_battery_sample_ms < SAMPLE_INTERVAL_MS) return;
+    s_last_battery_sample_ms = now;
+    int pct = sample_battery_pct();
+    display_set_battery(pct);
+    int bucket = pct / 10;   // 0..10
+    if (bucket != g_battery_bucket) {
+        Serial.printf("[bat] %d%% (bucket %d -> %d) — flagging redraw\n",
+                      pct, g_battery_bucket, bucket);
+        g_battery_bucket = bucket;
+        // Bucket change is the only time we redraw — otherwise the ADC
+        // noise + integer % would refresh the EPD constantly.
+        if (g_have_state) {
+            g_state_dirty  = true;
+            g_force_redraw = true;
+        }
+    }
+}
+
 void loop() {
     ble_loop();
     poll_buttons(millis());
+    poll_battery(millis());
 
     // Drain any pending EPD render. on_state and the BOOT button both just
     // set g_state_dirty; the actual SPI work happens here, on the main task,

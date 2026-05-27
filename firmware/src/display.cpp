@@ -38,6 +38,9 @@ private:
 static EpdCanvas s_canvas;
 static UsageState s_last;
 static bool       s_have_last = false;
+static int        s_battery_pct = -1;   // latest reading, -1 = unknown
+
+void display_set_battery(int pct) { s_battery_pct = pct; }
 
 // ---------- helpers ----------
 
@@ -80,7 +83,7 @@ static void draw_thick_bar(int x, int y, int w, int h, int remaining) {
     }
 }
 
-// Header strip: logo + brand. ~30 px tall.
+// Header strip: logo + brand + battery on the right. ~30 px tall.
 static void draw_header() {
     // Logo on the left
     draw_claude_mark(/*cx=*/14, /*cy=*/16, /*r=*/10, EPD_RED);
@@ -89,6 +92,36 @@ static void draw_header() {
     s_canvas.setTextColor(EPD_RED);
     s_canvas.setCursor(34, 24);
     s_canvas.print("CLAUDE");
+
+    // Battery — small filled-rect icon + numeric % on the right.
+    if (s_battery_pct >= 0) {
+        // Colour-tier: red < 20, yellow < 50, else black
+        uint16_t bc = (s_battery_pct < 20) ? EPD_RED
+                    : (s_battery_pct < 50) ? EPD_YELLOW : EPD_BLACK;
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%d%%", s_battery_pct);
+        s_canvas.setFont(&FreeSansBold9pt7b);
+        s_canvas.setTextColor(bc);
+        int16_t bx, by; uint16_t bw, bh;
+        s_canvas.getTextBounds(buf, 0, 0, &bx, &by, &bw, &bh);
+
+        // Icon: ~22×11 rect with a 2-px positive terminal on the right.
+        int icon_right = EPD_W - 6;
+        int icon_w = 22, icon_h = 11;
+        int icon_x = icon_right - icon_w;
+        int icon_y = 10;
+        s_canvas.drawRect(icon_x, icon_y, icon_w, icon_h, EPD_BLACK);
+        s_canvas.fillRect(icon_right, icon_y + 3, 2, icon_h - 6, EPD_BLACK);
+        int fill_w = (icon_w - 2) * s_battery_pct / 100;
+        if (fill_w > 0) {
+            s_canvas.fillRect(icon_x + 1, icon_y + 1, fill_w, icon_h - 2, bc);
+        }
+
+        // % text just left of the icon, baseline aligned with CLAUDE
+        s_canvas.setCursor(icon_x - 4 - bw, 22);
+        s_canvas.print(buf);
+    }
+
     // Red rule under the header
     s_canvas.fillRect(0, 30, EPD_W, 2, EPD_RED);
 }

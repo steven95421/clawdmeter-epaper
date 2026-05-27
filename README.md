@@ -14,6 +14,8 @@ The device sits on your desk and shows:
 - **Week** — same but for the 7-day budget.
 - A small **▼ tick** above each bar marks how much *time* is left in the
   period, so you can eyeball "am I pacing ahead of or behind the clock?"
+- **Battery %** in the header (read off GPIO4 / BAT_ADC, calibrated via
+  `analogReadMilliVolts`), so the device tells you when to charge.
 
 Refreshes every 5 min from the daemon, but the EPD only physically updates
 when something a user can actually see has changed (hour bucket flips, % moves
@@ -245,7 +247,7 @@ USB CDC port explicitly.
 
 ```
 ┌────────────────────┐
-│  ✱ CLAUDE          │  red asterisk + brand
+│  ✱ CLAUDE  87% [█▌]│  brand + battery (numeric % + filled icon)
 │════════════════════│  red rule
 │                    │
 │  Session     82%   │  yellow label / 12 pt colour-tier %
@@ -259,6 +261,9 @@ USB CDC port explicitly.
 │    Tomorrow 4:00AM │
 └────────────────────┘
 ```
+
+Battery is sampled every 5 s and bucketed by 10 %; the EPD only refreshes on
+bucket change so ADC noise doesn't blink the panel.
 
 Bar and tick share a frame: both deplete left-to-right. If the **▼ tick is
 inside the fill**, you're pacing fine (you have more budget left than time
