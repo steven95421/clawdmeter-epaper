@@ -5,7 +5,7 @@ macOS daemon. Spiritual fork of [HermannBjorgvin/Clawdmeter](https://github.com/
 re-targeted from a 480×480 AMOLED with LVGL animations to a 200×200 4-colour
 e-paper that can only do full refreshes.
 
-![Photo placeholder — drop a snap of the device on your desk here.](docs/device.jpg)
+![Clawdmeter e-paper device on a desk, showing Session 98% / Today 6:20PM and Week 83% / Tomorrow 4:00AM](docs/device.jpg)
 
 The device sits on your desk and shows:
 
