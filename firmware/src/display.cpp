@@ -6,6 +6,9 @@
 #include <Fonts/FreeSansBold12pt7b.h>
 #include <Fonts/FreeSansBold9pt7b.h>
 #include <Fonts/FreeSans9pt7b.h>
+#include <Fonts/FreeSerifBold12pt7b.h>
+#include <Fonts/FreeSerifBold9pt7b.h>
+#include <Fonts/FreeSerifItalic9pt7b.h>
 
 // ----- 4-colour canvas: Adafruit_GFX subclass writing into a 2bpp
 //       packed framebuffer that we then push to the panel verbatim. -----
@@ -39,8 +42,16 @@ static EpdCanvas s_canvas;
 static UsageState s_last;
 static bool       s_have_last = false;
 static int        s_battery_pct = -1;   // latest reading, -1 = unknown
+static bool       s_battery_charging = false;
+// Logo highlight rotation: increments each time display_render actually
+// draws (skipped renders don't count). Means "the logo moved" ≡ "we
+// received new state" at a glance.
+static int        s_anim_phase = 0;
 
-void display_set_battery(int pct) { s_battery_pct = pct; }
+void display_set_battery(int pct, bool charging) {
+    s_battery_pct = pct;
+    s_battery_charging = charging;
+}
 
 // ---------- helpers ----------
 
@@ -54,21 +65,105 @@ static uint16_t colour_for_remaining(int remaining) {
     return EPD_BLACK;
 }
 
-// Anthropic-style asterisk mark: three lines through (cx,cy) at 60° spacing,
-// thickened to ~3 px so it reads on the 200-DPI panel.
-static void draw_claude_mark(int cx, int cy, int r, uint16_t color) {
-    static const float angles_deg[3] = { 0.0f, 60.0f, 120.0f };
-    for (int i = 0; i < 3; i++) {
-        float a = angles_deg[i] * (float)M_PI / 180.0f;
-        int dx = (int)(r * cosf(a));
-        int dy = (int)(r * sinf(a));
-        // 3 parallel lines for thickness
-        s_canvas.drawLine(cx - dx, cy - dy, cx + dx, cy + dy, color);
-        s_canvas.drawLine(cx - dx,     cy - dy + 1, cx + dx,     cy + dy + 1, color);
-        s_canvas.drawLine(cx - dx + 1, cy - dy,     cx + dx + 1, cy + dy,     color);
+// Clawd — Anthropic's official Claude Code mascot crab. Base 20×20 grid
+// lifted from ClaudePix (claudepix.vercel.app)'s shared creature-engine.js:
+//   0 = transparent  1 = body (#CD7F6A → EPD_RED)  2 = eye (#0f0f0f → EPD_BLACK)
+//
+// Default eye cells are (row 6, col 7-or-13) and (row 7, col 7-or-13).
+// Per-frame animation moves / swaps those cells — taken verbatim from the
+// `idle_look_around` preset on ClaudePix so the motion reads as canon.
+constexpr int CLAWD_W = 20;
+constexpr int CLAWD_H = 20;
+static const uint8_t CLAWD_BASE[CLAWD_H][CLAWD_W] = {
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0},
+    {0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0},
+    {0,0,0,0,0,1,1,2,1,1,1,1,1,2,1,1,0,0,0,0},
+    {0,0,0,1,1,1,1,2,1,1,1,1,1,2,1,1,1,1,0,0},
+    {0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
+    {0,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0,0},
+    {0,0,0,1,0,1,1,1,1,1,1,1,1,1,1,1,0,1,0,0},
+    {0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0},
+    {0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0},
+    {0,0,0,0,0,1,1,1,1,1,1,1,1,1,1,1,0,0,0,0},
+    {0,0,0,0,0,1,0,0,1,0,0,0,1,0,0,1,0,0,0,0},
+    {0,0,0,0,0,1,0,0,1,0,0,0,1,0,0,1,0,0,0,0},
+    {0,0,0,0,0,1,0,0,1,0,0,0,1,0,0,1,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+    {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+};
+
+// Render Clawd at top-left (x,y) on the canvas, scaled `scale` × per cell.
+// `phase` cycles the eye animation (6-frame loop).
+static void draw_clawd(int x, int y, int scale, int phase) {
+    uint8_t frame[CLAWD_H][CLAWD_W];
+    memcpy(frame, CLAWD_BASE, sizeof(frame));
+
+    // Patch helpers — write directly into `frame`. Default eye is the 2×2
+    // square at rows {6,7} × cols {7,13}. Each frame clears that and
+    // repaints fresh eye cells.
+    auto clear_eyes = [&]() {
+        frame[6][7]  = 1; frame[7][7]  = 1;
+        frame[6][13] = 1; frame[7][13] = 1;
+    };
+    switch (phase % 6) {
+        case 1:  // look left — eyes shift to col 6/12
+            clear_eyes();
+            frame[6][6]  = 2; frame[7][6]  = 2;
+            frame[6][12] = 2; frame[7][12] = 2;
+            break;
+        case 2:  // look right — eyes shift to col 8/14
+            clear_eyes();
+            frame[6][8]  = 2; frame[7][8]  = 2;
+            frame[6][14] = 2; frame[7][14] = 2;
+            break;
+        case 3:  // look up — single-pixel eyes one row higher
+            clear_eyes();
+            frame[5][7]  = 2; frame[5][13] = 2;
+            break;
+        case 4:  // wink — left eye closes, right eye stays open
+            frame[6][7] = 1; frame[7][7] = 1;
+            break;
+        case 5:  // blink — both eyes close
+            clear_eyes();
+            break;
+        default: break;  // 0 = idle
     }
-    // Small filled centre so the joins look solid
-    s_canvas.fillCircle(cx, cy, 3, color);
+
+    for (int r = 0; r < CLAWD_H; r++) {
+        for (int c = 0; c < CLAWD_W; c++) {
+            uint8_t v = frame[r][c];
+            if (v == 0) continue;
+            uint16_t color = (v == 2) ? EPD_BLACK : EPD_RED;
+            if (scale == 1) {
+                s_canvas.drawPixel(x + c, y + r, color);
+            } else {
+                s_canvas.fillRect(x + c * scale, y + r * scale,
+                                  scale, scale, color);
+            }
+        }
+    }
+}
+
+// Render `text` with a 1-px outline in `outline` colour around `fg`.
+// 4 cardinal offsets (not 8-way) — at 9pt FreeSerifBold the diagonal
+// passes would smear adjacent strokes into each other.
+static void draw_outlined_text(const char* text, int x, int y,
+                               uint16_t fg, uint16_t outline) {
+    static const int dx[] = { -1,  1,  0,  0 };
+    static const int dy[] = {  0,  0, -1,  1 };
+    s_canvas.setTextColor(outline);
+    for (int i = 0; i < 4; i++) {
+        s_canvas.setCursor(x + dx[i], y + dy[i]);
+        s_canvas.print(text);
+    }
+    s_canvas.setTextColor(fg);
+    s_canvas.setCursor(x, y);
+    s_canvas.print(text);
 }
 
 // Plain rectangular bar with a 1-px black border. The fill represents
@@ -83,33 +178,50 @@ static void draw_thick_bar(int x, int y, int w, int h, int remaining) {
     }
 }
 
+// 7x11 lightning bolt bitmap (rows top→bottom, MSB = leftmost pixel).
+// Hand-traced so the kink in the middle is asymmetric — that's what makes
+// it read as ⚡ rather than as a generic zigzag.
+static const uint8_t BOLT_BMP[] = {
+    0x0C, // ....##.
+    0x18, // ...##..
+    0x30, // ..##...
+    0x60, // .##....
+    0xF8, // #####.. ← top of the kink (extends left past the upper diagonal)
+    0x3E, // ..##### ← bottom of the kink (extends right past the lower diagonal)
+    0x18, // ...##..
+    0x30, // ..##...
+    0x60, // .##....
+    0xC0, // ##.....
+    0x80, // #......
+};
+constexpr int BOLT_W = 7;
+constexpr int BOLT_H = 11;
+
+static void draw_bolt(int x, int y, uint16_t color) {
+    s_canvas.drawBitmap(x, y, BOLT_BMP, BOLT_W, BOLT_H, color);
+}
+
 // Header strip: logo + brand + battery on the right. ~30 px tall.
 static void draw_header() {
     // Logo on the left
-    draw_claude_mark(/*cx=*/14, /*cy=*/16, /*r=*/10, EPD_RED);
-    // "CLAUDE" in red
-    s_canvas.setFont(&FreeSansBold12pt7b);
+    // Clawd (Claude Code mascot crab), 2× scaled — content rows 4..16
+    // × cols 3..17 lands at screen (4..32, 2..26) with this offset, so
+    // the empty top rows of the grid sit off-canvas cleanly.
+    draw_clawd(/*x=*/-2, /*y=*/-6, /*scale=*/2, s_anim_phase);
+    // "CLAUDE" in red — pushed right to clear the 2× crab sprite.
+    s_canvas.setFont(&FreeSerifBold12pt7b);
     s_canvas.setTextColor(EPD_RED);
-    s_canvas.setCursor(34, 24);
+    s_canvas.setCursor(42, 24);
     s_canvas.print("CLAUDE");
 
-    // Battery — small filled-rect icon + numeric % on the right.
     if (s_battery_pct >= 0) {
-        // Colour-tier: red < 20, yellow < 50, else black
-        uint16_t bc = (s_battery_pct < 20) ? EPD_RED
-                    : (s_battery_pct < 50) ? EPD_YELLOW : EPD_BLACK;
-        char buf[8];
-        snprintf(buf, sizeof(buf), "%d%%", s_battery_pct);
-        s_canvas.setFont(&FreeSansBold9pt7b);
-        s_canvas.setTextColor(bc);
-        int16_t bx, by; uint16_t bw, bh;
-        s_canvas.getTextBounds(buf, 0, 0, &bx, &by, &bw, &bh);
-
-        // Icon: ~22×11 rect with a 2-px positive terminal on the right.
+        // Battery icon — drawn the same regardless of charging state
         int icon_right = EPD_W - 6;
         int icon_w = 22, icon_h = 11;
         int icon_x = icon_right - icon_w;
         int icon_y = 10;
+        uint16_t bc = (s_battery_pct < 20) ? EPD_RED
+                    : (s_battery_pct < 50) ? EPD_YELLOW : EPD_BLACK;
         s_canvas.drawRect(icon_x, icon_y, icon_w, icon_h, EPD_BLACK);
         s_canvas.fillRect(icon_right, icon_y + 3, 2, icon_h - 6, EPD_BLACK);
         int fill_w = (icon_w - 2) * s_battery_pct / 100;
@@ -117,9 +229,22 @@ static void draw_header() {
             s_canvas.fillRect(icon_x + 1, icon_y + 1, fill_w, icon_h - 2, bc);
         }
 
-        // % text just left of the icon, baseline aligned with CLAUDE
-        s_canvas.setCursor(icon_x - 4 - bw, 22);
-        s_canvas.print(buf);
+        if (s_battery_charging) {
+            // While charging, the LiPo curve is unreliable (terminal voltage
+            // is biased high by charge current). Hide the misleading % and
+            // draw a yellow ⚡ glyph on the left of the icon instead.
+            draw_bolt(icon_x - BOLT_W - 2, icon_y, EPD_YELLOW);
+        } else {
+            // Resting / discharging — % is meaningful, show it left of the icon.
+            char buf[8];
+            snprintf(buf, sizeof(buf), "%d%%", s_battery_pct);
+            s_canvas.setFont(&FreeSansBold9pt7b);
+            s_canvas.setTextColor(bc);
+            int16_t bx, by; uint16_t bw, bh;
+            s_canvas.getTextBounds(buf, 0, 0, &bx, &by, &bw, &bh);
+            s_canvas.setCursor(icon_x - 4 - bw, 22);
+            s_canvas.print(buf);
+        }
     }
 
     // Red rule under the header
@@ -140,11 +265,11 @@ static void draw_metric_block(int top, const char* label, int pct, int reset_min
     // crowd the divider above them.
     int header_baseline = top + 20;
 
-    // Label (yellow, small bold)
-    s_canvas.setFont(&FreeSansBold9pt7b);
-    s_canvas.setTextColor(EPD_YELLOW);
-    s_canvas.setCursor(6, header_baseline);
-    s_canvas.print(label);
+    // Label (yellow text with a black 1-px outline — pure yellow is too low
+    // contrast on white, but outlined it reads cleanly while keeping the
+    // accent colour)
+    s_canvas.setFont(&FreeSerifBold9pt7b);
+    draw_outlined_text(label, 6, header_baseline, EPD_YELLOW, EPD_BLACK);
 
     // Remaining-% — right-aligned at the same baseline
     s_canvas.setFont(&FreeSansBold12pt7b);
@@ -184,8 +309,9 @@ static void draw_metric_block(int top, const char* label, int pct, int reset_min
 
     // Reset countdown — prefer the wall-clock label from the daemon
     // ("Resets Today 1:20PM"); fall back to "Nh left" if the daemon hasn't
-    // sent one yet (older payload format).
-    s_canvas.setFont(&FreeSans9pt7b);
+    // sent one yet (older payload format). Italic serif to read as
+    // secondary metadata.
+    s_canvas.setFont(&FreeSerifItalic9pt7b);
     s_canvas.setTextColor(EPD_BLACK);
     String text;
     if (reset_label.length()) {
@@ -198,8 +324,10 @@ static void draw_metric_block(int top, const char* label, int pct, int reset_min
         text = String(reset_min) + "m left";
     }
     s_canvas.getTextBounds(text, 0, 0, &bx, &by, &bw, &bh);
-    // +18 = bar_bottom + 6 px gap + ~12 px ascent, so glyphs clear the bar
-    s_canvas.setCursor(EPD_W - 6 - bw, bar_y + bar_h + 18);
+    // +14 = bar_bottom + 4 px gap + ascent — tight enough that the italic
+    // descender (y/p/g) doesn't fall off the 200 px panel on the weekly
+    // block (whose bar_bottom sits at y=182).
+    s_canvas.setCursor(EPD_W - 6 - bw, bar_y + bar_h + 14);
     s_canvas.print(text);
 }
 
@@ -214,19 +342,34 @@ void display_begin() {
     epd_clear(EPD_WHITE);
 }
 
+void display_wake() {
+    // Same power-on + fast-LUT init as display_begin(), but WITHOUT epd_clear:
+    // the following display_render() rewrites the whole panel, so clearing
+    // first would only add a visible white flash and a wasted refresh cycle.
+    epd_power_on();
+    epd_init_fast();
+}
+
+void display_sleep() {
+    // Park the controller and drop its rail so the board draws ~nothing while
+    // the MCU is in deep sleep. The e-paper image persists (bistable).
+    epd_sleep();
+    epd_power_off();
+}
+
 void display_show_boot(const char* mac) {
     s_canvas.fillScreen(EPD_WHITE);
 
     draw_header();
 
-    s_canvas.setFont(&FreeSansBold12pt7b);
+    s_canvas.setFont(&FreeSerifBold12pt7b);
     s_canvas.setTextColor(EPD_BLACK);
     s_canvas.setCursor(6, 72);
     s_canvas.print("waiting for");
     s_canvas.setCursor(6, 96);
     s_canvas.print("daemon...");
 
-    s_canvas.setFont(&FreeSansBold9pt7b);
+    s_canvas.setFont(&FreeSerifBold9pt7b);
     s_canvas.setTextColor(EPD_YELLOW);
     s_canvas.setCursor(6, 140);
     s_canvas.print("MAC");
@@ -253,13 +396,13 @@ void display_render(const UsageState& s) {
     draw_header();
 
     if (!s.ok) {
-        s_canvas.setFont(&FreeSansBold12pt7b);
+        s_canvas.setFont(&FreeSerifBold12pt7b);
         s_canvas.setTextColor(EPD_RED);
         s_canvas.setCursor(6, 80);
         s_canvas.print("daemon");
         s_canvas.setCursor(6, 104);
         s_canvas.print("error");
-        s_canvas.setFont(&FreeSans9pt7b);
+        s_canvas.setFont(&FreeSerifItalic9pt7b);
         s_canvas.setTextColor(EPD_BLACK);
         s_canvas.setCursor(6, 134);
         s_canvas.print(s.status);
@@ -283,4 +426,7 @@ void display_render(const UsageState& s) {
     epd_display(s_canvas.buffer());
     s_last      = s;
     s_have_last = true;
+    // Advance the logo highlight by one petal for the next refresh — visual
+    // tick of "we drew something". Wraps at 6 inside draw_claude_mark.
+    s_anim_phase++;
 }

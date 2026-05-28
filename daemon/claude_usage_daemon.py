@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import fcntl
 import getpass
 import json
 import os
@@ -39,6 +40,19 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"  # optional, future
 POLL_INTERVAL = 300
 TICK = 5
 SCAN_TIMEOUT = 8.0
+# Aggressive rendezvous for the deep-sleep firmware: it only advertises for a
+# ~12-30s window every few minutes, so scan near-continuously while
+# disconnected (small retry gap) and don't burn 30s on a failed reconnect to a
+# board that has gone back to sleep.
+SCAN_BACKOFF_MAX = 5
+CONNECT_TIMEOUT = 10.0
+# Self-heal: macOS CoreBluetooth in a long-lived process often stops returning
+# scan results after the Mac sleeps/wakes. If we can't get a successful
+# connection for this long, relaunch a fresh process (fresh CBCentralManager).
+STALE_RESTART_S = 360
+MIN_RESTART_INTERVAL_S = 900
+APP_BUNDLE = "/Applications/ClawdmeterDaemon.app"
+LOCK_PATH = Path.home() / ".config" / "claude-usage-monitor" / "daemon.lock"
 
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
@@ -130,6 +144,40 @@ def load_cached_address():
 def save_address(addr):
     SAVED_ADDR_FILE.parent.mkdir(parents=True, exist_ok=True)
     SAVED_ADDR_FILE.write_text(addr)
+
+
+_lock_fh = None
+
+
+def acquire_singleton(timeout=6.0):
+    """Hold an exclusive flock so only one daemon runs at a time. Retries
+    briefly so a self-restart or the morning restarter can take the lock from
+    an instance that is just now exiting."""
+    global _lock_fh
+    LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    _lock_fh = open(LOCK_PATH, "w")
+    deadline = time.time() + timeout
+    while True:
+        try:
+            fcntl.flock(_lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            if time.time() >= deadline:
+                return False
+            time.sleep(0.3)
+
+
+def self_restart(reason):
+    """Relaunch a brand-new daemon process (fresh CoreBluetooth) and exit.
+    Going through the .app bundle keeps the Bluetooth TCC grant; `-n` forces a
+    new instance. We hard-exit so our flock releases for the replacement."""
+    log(f"Self-restart ({reason}) -- relaunching via {APP_BUNDLE}")
+    try:
+        subprocess.Popen(["/usr/bin/open", "-n", "-g", APP_BUNDLE])
+    except OSError as e:
+        log(f"Self-restart spawn failed: {e}")
+        return False
+    os._exit(0)
 
 
 async def scan_for_device():
@@ -247,7 +295,7 @@ async def connect_and_run(device_or_address, stop_event):
     target = device_or_address
     label = getattr(target, "address", target)
     log(f"Connecting to {label}...")
-    client = BleakClient(target, timeout=30.0)
+    client = BleakClient(target, timeout=CONNECT_TIMEOUT)
     try:
         await client.connect()
     except (BleakError, asyncio.TimeoutError) as e:
@@ -306,10 +354,32 @@ async def main():
         except NotImplementedError:
             signal.signal(sig, _stop)
 
+    if not acquire_singleton():
+        log("Another daemon instance already holds the lock -- exiting")
+        return
+
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
+    last_ok_ts = time.time()
+    last_restart_ts = time.time()
     backoff = 1
+
+    async def back_off_and_maybe_restart():
+        nonlocal backoff, last_restart_ts
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+        except asyncio.TimeoutError:
+            pass
+        backoff = min(backoff * 2, SCAN_BACKOFF_MAX)
+        t = time.time()
+        if (t - last_ok_ts > STALE_RESTART_S
+                and t - last_restart_ts > MIN_RESTART_INTERVAL_S):
+            # self_restart() hard-exits on success; we only fall through if the
+            # relaunch spawn itself failed, in which case throttle retries.
+            self_restart(f"no successful connection for {int(t - last_ok_ts)}s")
+            last_restart_ts = time.time()
+
     while not stop_event.is_set():
         target = load_cached_address()
         if not target:
@@ -319,24 +389,17 @@ async def main():
                 target = device
             else:
                 log(f"Device not found, retrying in {backoff}s...")
-                try:
-                    await asyncio.wait_for(stop_event.wait(), timeout=backoff)
-                except asyncio.TimeoutError:
-                    pass
-                backoff = min(backoff * 2, 60)
+                await back_off_and_maybe_restart()
                 continue
 
         ok = await connect_and_run(target, stop_event)
-        if not ok:
+        if ok:
+            last_ok_ts = time.time()
+            backoff = 1
+        else:
             log("Invalidating cached address")
             SAVED_ADDR_FILE.unlink(missing_ok=True)
-            try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
-            except asyncio.TimeoutError:
-                pass
-            backoff = min(backoff * 2, 60)
-        else:
-            backoff = 1
+            await back_off_and_maybe_restart()
 
 
 if __name__ == "__main__":

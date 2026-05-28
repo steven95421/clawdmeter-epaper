@@ -283,6 +283,45 @@ EOF
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
 
+# ---------- step 9: weekday-morning auto-restart LaunchAgent ---------------
+# macOS CoreBluetooth in a long-lived process tends to wedge across a
+# sleep/wake cycle (closing the lid to go home, reopening at the office), so
+# the daemon can stop finding the board until it's restarted. This second
+# agent gives it a guaranteed fresh process every weekday morning. If the Mac
+# is asleep at the scheduled time, launchd coalesces the missed event and runs
+# it on the next wake -- i.e. right when you open the laptop at work.
+RESTART_LABEL="$LABEL-restart"
+RESTART_AGENT="$HOME/Library/LaunchAgents/$RESTART_LABEL.plist"
+cat > "$RESTART_AGENT" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>$RESTART_LABEL</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>/usr/bin/pkill -f claude_usage_daemon.py; sleep 1; /usr/bin/open -g "$BUNDLE"</string>
+    </array>
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict><key>Weekday</key><integer>1</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Weekday</key><integer>2</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Weekday</key><integer>3</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Weekday</key><integer>4</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>30</integer></dict>
+        <dict><key>Weekday</key><integer>5</integer><key>Hour</key><integer>8</integer><key>Minute</key><integer>30</integer></dict>
+    </array>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
+EOF
+
+launchctl bootout "gui/$(id -u)/$RESTART_LABEL" 2>/dev/null || true
+launchctl bootstrap "gui/$(id -u)" "$RESTART_AGENT"
+
 cat <<EOF
 
 === Installed. ===

@@ -14,3 +14,8 @@ using UsageCallback = void (*)(const UsageState&);
 
 void ble_begin(const char* device_name, UsageCallback on_state);
 void ble_loop();
+
+// True while a BLE central (the daemon) is connected. The deep-sleep wake
+// window uses this to decide whether to keep waiting for a state push or bail
+// early when nobody is around.
+bool ble_client_connected();

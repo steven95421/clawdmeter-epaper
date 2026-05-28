@@ -9,6 +9,7 @@ static const char* TX_CHAR_UUID      = "4c41555a-4465-7669-6365-000000000003";
 
 static UsageCallback s_callback = nullptr;
 static NimBLECharacteristic* s_tx_char = nullptr;
+static volatile bool s_connected = false;
 
 class RxCallbacks : public NimBLECharacteristicCallbacks {
     void onWrite(NimBLECharacteristic* c) override {
@@ -37,8 +38,12 @@ class RxCallbacks : public NimBLECharacteristicCallbacks {
 };
 
 class ServerCallbacks : public NimBLEServerCallbacks {
-    void onConnect(NimBLEServer*) override   { Serial.println("[BLE] client connected"); }
+    void onConnect(NimBLEServer*) override {
+        s_connected = true;
+        Serial.println("[BLE] client connected");
+    }
     void onDisconnect(NimBLEServer* srv) override {
+        s_connected = false;
         Serial.println("[BLE] client disconnected, restarting advertising");
         srv->startAdvertising();
     }
@@ -81,3 +86,5 @@ void ble_loop() {
     // Hook for future heartbeat / TX notify if we ever want the firmware
     // to report status back to the daemon.
 }
+
+bool ble_client_connected() { return s_connected; }
