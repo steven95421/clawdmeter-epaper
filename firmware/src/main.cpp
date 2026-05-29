@@ -49,18 +49,16 @@ constexpr uint32_t CONNECT_WAIT_MS        = 12000;  // bail this wake if nobody 
 constexpr uint32_t STATE_WAIT_MS          = 30000;  // once connected, wait for the push
 constexpr uint32_t POST_STATE_GRACE_MS    = 1200;   // let the write settle before render
 
-// --- Charging detection (no VBUS sense GPIO, so we infer it) ---
-// Primary signal is the voltage SLOPE across wakes: while charging, vbat
-// climbs between wakes (the charger keeps running even while the MCU sleeps);
-// on battery it's flat or slowly falling (deep sleep draws ~µA). The slope
-// catches charging of a deeply-drained cell, which sits in the 3.6–3.9V CC
-// band for a long time and would fool any fixed threshold ("battery" while
-// actually charging). When the slope is flat (e.g. the CV plateau near full,
-// where vbat barely moves) we fall back to the absolute thresholds.
-constexpr float CHARGING_ENTER_V = 4.08f;   // flat & >= this  → charging (CV plateau)
-constexpr float CHARGING_EXIT_V  = 3.98f;   // flat & <= this  → on battery
-constexpr float CHARGE_RISE_V    = 0.015f;  // dvbat/wake >=  this → charging
-constexpr float CHARGE_FALL_V    = 0.010f;  // dvbat/wake <= -this → on battery
+// --- Charging detection (voltage-only) ---
+// This board has no VBUS-sense GPIO, and with ARDUINO_USB_MODE=1 the USB stack
+// is the Serial-JTAG (HWCDC), not TinyUSB — so there is no reliable software
+// "USB power present" signal to read. We infer charging from the vbat SLOPE
+// across wakes and bias hard to "battery" so the icon can never latch on after
+// unplugging: only a rising voltage (or a near-full CV plateau) reads as
+// charging; flat-and-not-full or falling reads as battery.
+constexpr float CHARGE_RISE_V   = 0.015f;  // dvbat/wake >=  this → charging
+constexpr float CHARGE_FALL_V   = 0.010f;  // dvbat/wake <= -this → battery
+constexpr float CHARGING_FULL_V = 4.15f;   // flat & >= this      → CV plateau (charging)
 
 // --- Persisted across deep sleep (RTC slow memory) ---
 RTC_DATA_ATTR static uint32_t rtc_render_sig  = 0;       // sig of the on-screen image
@@ -68,6 +66,37 @@ RTC_DATA_ATTR static bool     rtc_sig_valid   = false;   // is rtc_render_sig me
 RTC_DATA_ATTR static int      rtc_miss_streak = 0;       // consecutive daemon-absent wakes
 RTC_DATA_ATTR static bool     rtc_charging    = false;   // charge-state latch
 RTC_DATA_ATTR static float    rtc_last_vbat   = 0.0f;    // last wake's vbat (slope detect)
+
+// Last usage state, persisted so a BOOT-button wake can repaint the dashboard
+// immediately without waiting for the next daemon push. RTC RAM can't hold an
+// Arduino String, so the wall-clock labels live in fixed char buffers.
+RTC_DATA_ATTR static bool rtc_have_state = false;
+RTC_DATA_ATTR static int  rtc_s = 0, rtc_sr = 0, rtc_w = 0, rtc_wr = 0;
+RTC_DATA_ATTR static bool rtc_ok = false;
+RTC_DATA_ATTR static char rtc_sa[24] = {0};
+RTC_DATA_ATTR static char rtc_wa[24] = {0};
+RTC_DATA_ATTR static char rtc_st[16] = {0};
+
+static void save_state_rtc(const UsageState& s) {
+    rtc_s = s.session_pct;  rtc_sr = s.session_reset_min;
+    rtc_w = s.weekly_pct;   rtc_wr = s.weekly_reset_min;
+    rtc_ok = s.ok;
+    snprintf(rtc_sa, sizeof(rtc_sa), "%s", s.session_reset_at.c_str());
+    snprintf(rtc_wa, sizeof(rtc_wa), "%s", s.weekly_reset_at.c_str());
+    snprintf(rtc_st, sizeof(rtc_st), "%s", s.status.c_str());
+    rtc_have_state = true;
+}
+
+static UsageState load_state_rtc() {
+    UsageState s;
+    s.session_pct = rtc_s;  s.session_reset_min = rtc_sr;
+    s.weekly_pct  = rtc_w;  s.weekly_reset_min  = rtc_wr;
+    s.ok = rtc_ok;
+    s.session_reset_at = rtc_sa;
+    s.weekly_reset_at  = rtc_wa;
+    s.status = rtc_st;
+    return s;
+}
 
 // --- Usage state pushed by the daemon during the wake window ---
 static UsageState    g_state;
@@ -185,25 +214,19 @@ void setup() {
     Serial.printf("\n[wake] cause=%d cold=%d boot_btn=%d miss_streak=%d\n",
                   (int)cause, (int)cold_boot, (int)boot_btn, rtc_miss_streak);
 
-    // --- battery + charge state (voltage slope across wakes; see notes above) ---
+    // --- battery + charge state (voltage slope across wakes; biased to battery
+    //     so the charging icon never latches on after unplugging) ---
     BatterySample b = sample_battery();
     float dv = cold_boot ? 0.0f : (b.vbat - rtc_last_vbat);
-    if (cold_boot) {
-        rtc_charging = (b.vbat >= CHARGING_ENTER_V);   // no prior sample to slope against
-    } else if (dv >=  CHARGE_RISE_V) {
-        rtc_charging = true;                            // climbing → charging
-    } else if (dv <= -CHARGE_FALL_V) {
-        rtc_charging = false;                           // dropping → on battery
-    } else if (b.vbat >= CHARGING_ENTER_V) {
-        rtc_charging = true;                            // flat & high → CV plateau
-    } else if (b.vbat <= CHARGING_EXIT_V) {
-        rtc_charging = false;                           // flat & low → on battery
-    }   // else flat in the dead band → keep previous state
-    rtc_last_vbat = b.vbat;
+    if      (dv >=  CHARGE_RISE_V)      rtc_charging = true;    // climbing      → charging
+    else if (dv <= -CHARGE_FALL_V)      rtc_charging = false;   // dropping      → battery
+    else if (b.vbat >= CHARGING_FULL_V) rtc_charging = true;    // flat & full   → CV plateau
+    else                                rtc_charging = false;   // flat & not full → battery
+    rtc_last_vbat   = b.vbat;
+    int batt_bucket = b.pct / 10;
     Serial.printf("[bat] vbat=%.3fV (d%+.3f) -> %d%% (%s)\n",
                   b.vbat, dv, b.pct, rtc_charging ? "charging" : "battery");
     display_set_battery(b.pct, rtc_charging);
-    int batt_bucket = b.pct / 10;
 
     // --- bring BLE up and start advertising ---
     ble_begin("Claude Controller", on_state);
@@ -217,6 +240,18 @@ void setup() {
         display_show_boot(NimBLEDevice::getAddress().toString().c_str());
         panel_on      = true;
         rtc_sig_valid = false;   // force the first real render after a cold boot
+    } else if (boot_btn && rtc_have_state) {
+        // BOOT-button wake → repaint the last-known dashboard immediately so the
+        // user gets instant feedback instead of waiting for the next daemon
+        // push. Fresh data (if the daemon connects below) only redraws again if
+        // it actually differs.
+        display_wake();
+        panel_on = true;
+        UsageState last = load_state_rtc();
+        display_render(last);
+        rtc_render_sig = compute_sig(last, batt_bucket, rtc_charging);
+        rtc_sig_valid  = true;
+        Serial.println("[boot-btn] forced redraw of last-known state");
     }
 
     // --- wake window: wait for the daemon to connect, then push one update ---
@@ -238,8 +273,11 @@ void setup() {
         rtc_miss_streak = 0;
         delay(POST_STATE_GRACE_MS);
         UsageState s   = g_state;
+        save_state_rtc(s);                 // persist for future BOOT-button redraws
         uint32_t   sig = compute_sig(s, batt_bucket, rtc_charging);
-        bool need_render = boot_btn || !rtc_sig_valid || sig != rtc_render_sig;
+        // (BOOT force-redraw already happened up front from RTC; here we only
+        //  redraw when the fresh push actually differs from what's on screen.)
+        bool need_render = !rtc_sig_valid || sig != rtc_render_sig;
         if (need_render) {
             if (!panel_on) { display_wake(); panel_on = true; }
             display_render(s);

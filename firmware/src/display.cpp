@@ -208,10 +208,12 @@ static void draw_header() {
     // × cols 3..17 lands at screen (4..32, 2..26) with this offset, so
     // the empty top rows of the grid sit off-canvas cleanly.
     draw_clawd(/*x=*/-2, /*y=*/-6, /*scale=*/2, s_anim_phase);
-    // "CLAUDE" in red — pushed right to clear the 2× crab sprite.
-    s_canvas.setFont(&FreeSerifBold12pt7b);
+    // "CLAUDE" in red — 9pt (not 12pt) so the right side stays clear of the
+    // battery %, which right-aligns toward the icon and used to collide with
+    // the wider 12pt wordmark. Sits just right of the 2× crab sprite.
+    s_canvas.setFont(&FreeSerifBold9pt7b);
     s_canvas.setTextColor(EPD_RED);
-    s_canvas.setCursor(42, 24);
+    s_canvas.setCursor(42, 22);
     s_canvas.print("CLAUDE");
 
     if (s_battery_pct >= 0) {
@@ -296,7 +298,25 @@ static void draw_metric_block(int top, const char* label, int pct, int reset_min
     // than time (burning fast).
     if (period_min > 0 && reset_min >= 0 && reset_min <= period_min) {
         int tick_x = bar_x + 1 + ((bar_w - 2) * reset_min / period_min);
+        // Colour the tick by burn pace: diff = budget_left% - time_left%.
+        //   diff >= 5  → budget comfortably ahead of the clock   → black
+        //   -5 .. 4    → roughly at parity (or just barely over)  → yellow
+        //   diff < -5  → burning budget clearly faster than time  → red
+        // A black outline keeps the yellow/red fill readable on white.
+        uint16_t tick_colour = EPD_BLACK;
+        if (remaining >= 0) {
+            int time_left_pct = 100 * reset_min / period_min;
+            int diff = remaining - time_left_pct;
+            if      (diff < -5) tick_colour = EPD_RED;
+            else if (diff <  5) tick_colour = EPD_YELLOW;
+        }
         s_canvas.fillTriangle(
+            tick_x,     bar_y - 1,
+            tick_x - 4, bar_y - 7,
+            tick_x + 4, bar_y - 7,
+            tick_colour
+        );
+        s_canvas.drawTriangle(
             tick_x,     bar_y - 1,
             tick_x - 4, bar_y - 7,
             tick_x + 4, bar_y - 7,
