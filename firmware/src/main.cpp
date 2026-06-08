@@ -22,6 +22,55 @@
 
 static UsageData usage = {};
 
+#ifdef BOARD_EPAPER_154G
+#include <esp_sleep.h>
+
+// ---- Deep-sleep power-nap (battery operation) -------------------------------
+// The JD79667 panel is bistable: it holds its image with zero power, so the
+// most frugal model is to deep-sleep the MCU + radio between updates and wake
+// only periodically to fetch fresh usage data and (if it changed) refresh.
+//   • timer wake  : bring BLE up, wait briefly for the daemon to push, refresh
+//                   only if the frame changed, then sleep again.
+//   • cold/button : stay awake a longer window for interaction + (re)flashing.
+// "Refresh only if changed" is gated by the RTC-persisted frame hash in
+// display.cpp, so an unchanged wake costs no ~15 s refresh and no flash.
+extern "C" void board_enter_deep_sleep(uint32_t wake_min);  // waveshare_epaper_154g/power.cpp
+bool display_hal_idle(void);                                // waveshare_epaper_154g/display.cpp
+
+#define NAP_WAKE_INTERVAL_MIN   15   // deep-sleep wake cadence (minutes); tunable for battery vs freshness
+#define NAP_AWAKE_TIMER_MS      15000UL   // timer wake: cap the wait for a data push
+#define NAP_AWAKE_INTERACT_MS   60000UL   // cold/button wake: interaction + flash window
+
+static esp_sleep_wakeup_cause_t nap_wake_cause = ESP_SLEEP_WAKEUP_UNDEFINED;
+static bool     nap_is_timer_wake = false;
+static uint32_t nap_boot_ms       = 0;
+static bool     nap_got_data      = false;
+static uint32_t nap_got_data_ms   = 0;
+
+static void nap_tick(void) {
+    const uint32_t now = millis();
+    if (nap_boot_ms == 0) nap_boot_ms = now;   // first loop = wake epoch
+
+    if (usage.valid && !nap_got_data) { nap_got_data = true; nap_got_data_ms = now; }
+
+    const uint32_t awake  = now - nap_boot_ms;
+    const uint32_t budget = nap_is_timer_wake ? NAP_AWAKE_TIMER_MS : NAP_AWAKE_INTERACT_MS;
+
+    bool sleep_now = false;
+    if (nap_is_timer_wake && nap_got_data && display_hal_idle()
+        && (now - nap_got_data_ms) > 800) {
+        sleep_now = true;                      // fetched + committed → sleep early
+    } else if (awake > budget && display_hal_idle()) {
+        sleep_now = true;                      // window elapsed (timed out / interactive)
+    }
+
+    if (sleep_now) {
+        Serial.printf("{\"sleep_min\":%d}\n", NAP_WAKE_INTERVAL_MIN);
+        board_enter_deep_sleep(NAP_WAKE_INTERVAL_MIN);   // never returns
+    }
+}
+#endif
+
 // ---- LVGL draw buffers (partial render mode) ----
 // PSRAM-equipped boards (S3) can comfortably hold larger strips. PSRAM-free
 // boards (e.g. ESP32-C6) allocate from internal SRAM, so we shrink the strip
@@ -184,8 +233,21 @@ void setup() {
 
     board_init();
 
+#ifdef BOARD_EPAPER_154G
+    nap_wake_cause    = esp_sleep_get_wakeup_cause();
+    nap_is_timer_wake = (nap_wake_cause == ESP_SLEEP_WAKEUP_TIMER);
+#endif
+
     display_hal_init();
+#ifdef BOARD_EPAPER_154G
+    // Cold boot only: paint the panel white and seed the shown-frame hash. On a
+    // deep-sleep wake the bistable panel still shows the last frame, so skip the
+    // white flash and trust the RTC-persisted hash — we refresh later only if
+    // the freshly fetched data actually changes the image.
+    if (nap_wake_cause == ESP_SLEEP_WAKEUP_UNDEFINED) display_hal_begin();
+#else
     display_hal_begin();
+#endif
     idle_init();        // takes over panel brightness and starts the idle timer
     brightness_init();  // load the user's saved brightness level and apply via idle
 
@@ -220,7 +282,15 @@ void setup() {
     ui_init();
     ui_update_ble_status(ble_get_state(), ble_get_device_name(), ble_get_mac_address());
     ui_update_battery(power_hal_battery_pct(), power_hal_is_charging());
+#ifdef BOARD_EPAPER_154G
+    // e-paper can't animate (~15 s per full refresh); the animated splash
+    // thrashes the panel and a touchless board needs a PWR press to leave it.
+    // Boot straight to the usage screen (shows the pair hint until the daemon
+    // connects). PWR on the usage screen no longer toggles back to the splash.
+    ui_show_screen(SCREEN_USAGE);
+#else
     ui_show_screen(SCREEN_SPLASH);
+#endif
 
     Serial.printf("Dashboard ready (%s, %dx%d), waiting for data on BLE...\n",
         board_caps().name, W, H);
@@ -378,5 +448,8 @@ void loop() {
         }
     }
 
+#ifdef BOARD_EPAPER_154G
+    nap_tick();   // deep-sleep power-nap: fetch → refresh-if-changed → sleep
+#endif
     delay(5);
 }

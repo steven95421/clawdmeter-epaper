@@ -190,6 +190,12 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
+// 154G 4-colour bar gradient (black -> yellow -> orange -> red). A clean
+// bright yellow (distinct from the terra-cotta accent) and an "orange" that
+// the waveshare_epaper_154g display HAL renders as a YELLOW+RED dither —
+// orange is not a native JD79667 ink. Both are only used in 154g-gated code.
+#define COL_YELLOW        lv_color_hex(0xf5c518)
+#define COL_ORANGE_DITHER lv_color_hex(0xff7f00)
 
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
@@ -277,20 +283,26 @@ static const char* const anim_messages[] = {
 #define ANIM_MSG_COUNT (sizeof(anim_messages) / sizeof(anim_messages[0]))
 
 static lv_color_t pct_color(float pct) {
-    // On the tiny e-paper tier the display HAL inverts pixel luminance,
-    // and only COL_AMBER lands cleanly on the panel-black side of the
-    // threshold (COL_RED inverts to invisible-white; COL_GREEN is on
-    // the edge). Forcing the indicator to a high-luminance text colour
-    // makes the filled portion render as a solid panel-black bar
-    // regardless of rate-group, paired with the bar's high-luminance
-    // border for a clean black-outline + black-fill paper-style bar.
+#ifndef BOARD_EPAPER_154G
+    // 1bpp inverting mono e-paper (waveshare_epaper_154): force a
+    // high-luminance text colour so the filled bar lands on the panel-black
+    // side of the luminance threshold (real COL_RED/COL_GREEN would invert to
+    // near-white). The 4-colour 154G panel SKIPS this and uses true rate
+    // colours, which its display classifier maps to RED / YELLOW / BLACK.
     if (L.scr_h < 250) return COL_TEXT;
+#endif
     if (pct >= 80.0f) return COL_RED;
     if (pct >= 50.0f) return COL_AMBER;
     return COL_GREEN;
 }
 
 static void format_reset_time(int mins, char* buf, size_t len) {
+#ifdef BOARD_EPAPER_154G
+    // Coarsen to 15-min steps: a per-minute countdown would re-render the
+    // label every minute, and each e-paper full refresh is ~15 s — that reads
+    // as constant flashing. Rounding makes the label change ~once per 15 min.
+    if (mins > 0) { mins = ((mins + 7) / 15) * 15; if (mins < 15) mins = 15; }
+#endif
     if (mins < 0) {
         snprintf(buf, len, "---");
     } else if (mins < 60) {
@@ -344,8 +356,17 @@ static lv_obj_t* make_bar(lv_obj_t* parent, int x, int y, int w, int h) {
     // at the left edge.
     if (L.scr_h < 250) {
         lv_obj_set_style_border_color(bar, COL_TEXT, LV_PART_MAIN);
-        lv_obj_set_style_border_width(bar, 2, LV_PART_MAIN);
+        lv_obj_set_style_border_width(bar, 1, LV_PART_MAIN);
         lv_obj_set_style_border_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+        // Also outline the coloured fill itself in BLACK so the
+        // yellow/orange/red indicator reads as a framed segment (the
+        // indicator draws over the track, so the MAIN border alone leaves the
+        // filled portion un-outlined). The blue-gate classifier folds the
+        // fill/border anti-alias fringe into BLACK, so the 2px edge stays
+        // solid at the rounded corners.
+        lv_obj_set_style_border_color(bar, COL_TEXT, LV_PART_INDICATOR);
+        lv_obj_set_style_border_width(bar, 1, LV_PART_INDICATOR);
+        lv_obj_set_style_border_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
     }
     return bar;
 }
@@ -368,9 +389,26 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     // COL_BAR_BG fill would vanish into the white paper — invert the pill
     // (light fill, dark text in LVGL) so it renders as a solid BLACK pill
     // with WHITE "Current"/"Weekly" text on the panel.
+#ifdef BOARD_EPAPER_154G
+    // 4-colour BWRY panel: a solid RED pill with WHITE "Current"/"Weekly"
+    // text. COL_RED classifies to RED ink and COL_BG (black in LVGL) maps to
+    // WHITE on the panel, so this is the colourful signature alongside the
+    // red logo and title — no muddy yellow involved.
+    lv_obj_set_style_bg_color(lbl, COL_RED, 0);
+    lv_obj_set_style_text_color(lbl, COL_BG, 0);
+    // Black outline around the rounded (LV_RADIUS_CIRCLE) red pill — COL_TEXT
+    // classifies to BLACK ink. 2px is enough now that the classifier's blue
+    // gate folds the red/border anti-alias fringe into BLACK rather than a
+    // yellow halo: the converted fringe effectively thickens the ring inward,
+    // so a thin 2px border still reads as a solid, continuous outline.
+    lv_obj_set_style_border_color(lbl, COL_TEXT, 0);
+    lv_obj_set_style_border_width(lbl, 2, 0);
+    lv_obj_set_style_border_opa(lbl, LV_OPA_COVER, 0);
+#else
     const bool pill_invert = (L.scr_h < 250);
     lv_obj_set_style_bg_color(lbl, pill_invert ? COL_TEXT : COL_BAR_BG, 0);
     lv_obj_set_style_text_color(lbl, pill_invert ? COL_BG : COL_TEXT, 0);
+#endif
     lv_obj_set_style_bg_opa(lbl, LV_OPA_COVER, 0);
     lv_obj_set_style_radius(lbl, LV_RADIUS_CIRCLE, 0);
     // Pill padding scales with the font: keep tight on the tiny tier so
@@ -478,7 +516,12 @@ static void init_usage_screen(lv_obj_t* scr) {
     lbl_title = lv_label_create(usage_container);
     lv_label_set_text(lbl_title, "Usage");
     lv_obj_set_style_text_font(lbl_title, L.usage_title_font, 0);
+#ifdef BOARD_EPAPER_154G
+    // Red "Usage" title — part of the colourful BWRY signature.
+    lv_obj_set_style_text_color(lbl_title, COL_RED, 0);
+#else
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
+#endif
     // On AMOLED the title is shifted +16 to clear the 80×80 top-left
     // logo overlay. On the tiny tier the logo is scaled to ~30 px and
     // doesn't reach the title, so center cleanly.
@@ -591,32 +634,87 @@ void ui_init(void) {
     lv_image_set_scale(battery_img, battery_scale);
     lv_obj_set_pos(battery_img, L.scr_w - battery_w - L.margin,
                    tiny ? 0 : L.title_y);
+
+#ifdef BOARD_EPAPER_154G
+    // The logo (terra-cotta crab) and battery glyph are warm-coloured bitmaps
+    // that the BWRY classifier would map to muddy YELLOW. For a clean
+    // black-on-white dashboard (colour reserved for warnings), recolour both to
+    // COL_TEXT — the classifier renders that as BLACK ink. The recolor style
+    // persists across lv_image_set_src, so battery state changes stay black.
+    lv_obj_set_style_image_recolor(logo_img, COL_RED, 0);
+    lv_obj_set_style_image_recolor_opa(logo_img, LV_OPA_COVER, 0);
+    lv_obj_set_style_image_recolor(battery_img, COL_TEXT, 0);
+    lv_obj_set_style_image_recolor_opa(battery_img, LV_OPA_COVER, 0);
+#endif
+}
+
+// Render one usage metric (percentage label + bar + colour).
+//   154g e-paper: show REMAINING budget (100 - utilization), like the
+//   standalone firmware — the number + bar DEPLETE as you use Claude, and the
+//   colour escalates as little is left (low remaining = warning):
+//     remaining > 50 -> GREEN (plenty) ; 20..50 -> AMBER ; <= 20 -> RED.
+//   Other boards keep showing UTILISATION % (rises as you use), coloured by
+//   pct_color().
+static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
+#ifdef BOARD_EPAPER_154G
+    int rem = 100 - (int)(util_pct + 0.5f);
+    if (rem < 0) rem = 0; else if (rem > 100) rem = 100;
+    lv_label_set_text_fmt(pct_lbl, "%d%%", rem);
+    lv_bar_set_value(bar, rem, LV_ANIM_OFF);
+    // 4-step heat gradient on remaining budget: BLACK (plenty) -> YELLOW ->
+    // ORANGE -> RED (almost out). ORANGE is a YELLOW+RED dither on this
+    // 4-colour panel (resolved in the display HAL); the others are native ink.
+    lv_color_t c = (rem >= 75) ? COL_TEXT
+                 : (rem >= 50) ? COL_YELLOW
+                 : (rem >= 25) ? COL_ORANGE_DITHER
+                               : COL_RED;
+    lv_obj_set_style_bg_color(bar, c, LV_PART_INDICATOR);
+#else
+    int u = (int)(util_pct + 0.5f);
+    lv_label_set_text_fmt(pct_lbl, "%d%%", u);
+    lv_bar_set_value(bar, u, LV_ANIM_ON);
+    lv_obj_set_style_bg_color(bar, pct_color(util_pct), LV_PART_INDICATOR);
+#endif
 }
 
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
 
-    int s_pct = (int)(data->session_pct + 0.5f);
-
-    lv_label_set_text_fmt(lbl_session_pct, "%d%%", s_pct);
-    lv_bar_set_value(bar_session, s_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_session, pct_color(data->session_pct), LV_PART_INDICATOR);
-
     char buf[48];
+    set_usage_metric(lbl_session_pct, bar_session, data->session_pct);
     format_reset_time(data->session_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_session_reset, buf);
 
-    int w_pct = (int)(data->weekly_pct + 0.5f);
-    lv_label_set_text_fmt(lbl_weekly_pct, "%d%%", w_pct);
-    lv_bar_set_value(bar_weekly, w_pct, LV_ANIM_ON);
-    lv_obj_set_style_bg_color(bar_weekly, pct_color(data->weekly_pct), LV_PART_INDICATOR);
-
+    set_usage_metric(lbl_weekly_pct, bar_weekly, data->weekly_pct);
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
 }
 
 void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
+
+#ifdef BOARD_EPAPER_154G
+    // 4-colour full-refresh e-paper (~15 s/refresh): do NOT animate — a
+    // rotating spinner/word would thrash the panel. Show a STATIC state word,
+    // RED when disconnected so "no data" reads as a warning. Only touch the
+    // label when the state actually changes, so a steady state produces no
+    // dirty pixels and the display HAL stays idle.
+    {
+        const int st = !s_ble_connected ? (ble_has_bonds() ? 1 /*disconnected*/
+                                                            : 2 /*pairing*/)
+                                         : 0 /*tracking*/;
+        static int last_st = -1;
+        if (st != last_st) {
+            last_st = st;
+            // Clean scheme: colour reserved for warnings. Tracking/Pairing are
+            // BLACK; only Disconnected (a warning) is RED.
+            lv_obj_set_style_text_color(lbl_anim, st == 1 ? COL_RED : COL_TEXT, 0);
+            lv_label_set_text(lbl_anim, st == 1 ? "Disconnected"
+                                      : st == 2 ? "Pairing" : "Tracking");
+        }
+        return;
+    }
+#endif
 
     uint32_t now = lv_tick_get();
 

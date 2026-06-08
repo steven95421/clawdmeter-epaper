@@ -6,6 +6,8 @@ ESP32 "Clawdmeter" peripheral over a custom GATT service. Uses
 bleak (CoreBluetooth backend on macOS).
 """
 
+from __future__ import annotations  # 3.9-compat: lazy annotations (X | None)
+
 import asyncio
 import getpass
 import json
@@ -171,6 +173,7 @@ async def scan_for_device() -> str | None:
 # physical link, so this rides the existing HID connection — the keyboard
 # keeps working.
 _cb_manager = None  # reused CentralManagerDelegate (CoreBluetooth)
+_cb_fastpath_broken = False  # set once if the macOS system-connected fast-path is unusable
 
 
 async def _get_cb_manager():
@@ -203,13 +206,19 @@ async def retrieve_connected_macos(skip_addr: str | None = None):
     ``skip_addr`` skips a peripheral whose UUID just failed to connect, so a
     stale CoreBluetooth handle can't trap us into never trying a fresh scan.
     """
+    global _cb_fastpath_broken
+    if _cb_fastpath_broken:
+        return None  # fast-path already known unusable on this bleak; scan handles it
+
     from CoreBluetooth import CBUUID
     from bleak.backends.device import BLEDevice
 
     try:
         manager = await _get_cb_manager()
-    except Exception as e:  # BleakBluetoothNotAvailableError etc.
-        log(f"CoreBluetooth unavailable: {e}")
+    except Exception as e:  # e.g. bleak 1.x dropped CentralManagerDelegate.wait_until_ready
+        log(f"CoreBluetooth system-connected fast-path unavailable ({e}); "
+            f"using scan-by-name for the rest of this run")
+        _cb_fastpath_broken = True
         return None
 
     cm = manager.central_manager
@@ -257,7 +266,6 @@ async def discover_target(skip_addr: str | None = None):
         dev = await retrieve_connected_macos(skip_addr=skip_addr)
         if dev is not None:
             return dev
-        log(f"Not held by OS; scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
         dev = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=SCAN_TIMEOUT)
         if dev:
             log(f"Found: {dev.address}")
@@ -415,6 +423,7 @@ async def main() -> None:
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     backoff = 1
+    missing_announced = False  # log "device missing" once per sleep gap, not per scan
     skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
     while not stop_event.is_set():
         # Apply any pending skip exactly once, then clear it so the next
@@ -422,13 +431,16 @@ async def main() -> None:
         target = await discover_target(skip_addr=skip_addr)
         skip_addr = None
         if not target:
-            log(f"Device not found, retrying in {backoff}s...")
+            if not missing_announced:
+                log("Device not found; scanning frequently, quiet until it wakes...")
+                missing_announced = True
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=backoff)
             except asyncio.TimeoutError:
                 pass
-            backoff = min(backoff * 2, 60)
+            backoff = min(backoff * 2, 3)
             continue
+        missing_announced = False
 
         addr = target if isinstance(target, str) else target.address
         ok = await connect_and_run(target, stop_event)
@@ -444,7 +456,7 @@ async def main() -> None:
                 await asyncio.wait_for(stop_event.wait(), timeout=backoff)
             except asyncio.TimeoutError:
                 pass
-            backoff = min(backoff * 2, 60)
+            backoff = min(backoff * 2, 3)
         else:
             backoff = 1
 
