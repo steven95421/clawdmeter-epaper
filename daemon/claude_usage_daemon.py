@@ -30,7 +30,7 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 
 POLL_INTERVAL = 60
 TICK = 5
-SCAN_TIMEOUT = 8.0
+SCAN_TIMEOUT = 4.0  # short scans cut BT-radio occupancy; a board advert is seen in <1s
 
 # macOS: token lives in Keychain (service "Claude Code-credentials").
 # Linux: token lives in ~/.claude/.credentials.json.
@@ -422,43 +422,108 @@ async def main() -> None:
     log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
-    backoff = 1
-    missing_announced = False  # log "device missing" once per sleep gap, not per scan
-    skip_addr: str | None = None  # macOS: a peripheral to skip for one cycle
+    # --- Anchored low-duty scan scheduling ---------------------------------
+    # The board deep-sleeps and only advertises briefly per wake (~15 s on the
+    # periodic timer wake, ~60 s on a PWR-button / cold-boot wake), every
+    # NAP_WAKE_INTERVAL_MIN minutes. Continuous scanning to catch that window
+    # monopolises the Mac's single Bluetooth radio and makes other BT devices
+    # (e.g. a mouse) stutter. So:
+    #   * ANCHOR on each CONFIRMED disconnect (sleep_since): the board just
+    #     entered deep sleep, so the next timer wake is ~= sleep_since + interval.
+    #   * Learn the sleep interval, but TRUST it only once the last few sleeps
+    #     are CONSISTENT (confident). When confident AND provably still asleep,
+    #     scan only lightly ("quiet", IDLE_LONG_PERIOD ~ once/min — enough to
+    #     catch a ~60 s button advertisement); radio is mostly free.
+    #   * Otherwise scan tightly ("watch", IDLE_SHORT_PERIOD) so the dead gap
+    #     stays under the ~15 s timer window and we detect AND connect in time
+    #     (~3 s). "watch" covers the approach to a wake, cold start, an
+    #     unconfident / changing cadence, a board that's been gone a while, and
+    #     the cycle right after any missed wake.
+    # We RE-ANCHOR on every contact, so the phase never free-runs (a missed wake
+    # just leaves us in "watch", which catches the next wake). A 45 s "quiet"
+    # poll is used ONLY when we're confident the board can't be waking, so it can
+    # never straddle a 15 s timer window. The interval is recomputed from the
+    # recent window, so it tracks the true cadence in BOTH directions; a one-off
+    # button / missed-wake gap breaks consistency -> we fall back to "watch",
+    # which only costs duty, never a missed wake.
+    IDLE_SHORT_PERIOD = 10    # "watch" wait; dead gap < 15 s timer window (detect + ~3 s connect)
+    IDLE_LONG_PERIOD  = 45    # "quiet" wait (confident + provably asleep); < 60 s button window
+    ACTIVE_WAIT       = 2     # s between rapid retries right after a failed connect
+    PRE_WINDOW        = 90    # s before the predicted wake to switch from "quiet" to "watch"
+    MIN_LEARN_GAP     = 120   # s: ignore sleep gaps below this (rapid retries / very short)
+    MAX_LEARN_GAP     = 3600  # s: ignore implausibly long gaps (daemon / Mac downtime)
+    STABLE_SAMPLES    = 2     # consecutive consistent sleep gaps required to trust the cadence
+    STABLE_RATIO      = 1.3   # "consistent" = max/min of those recent gaps within this ratio
+
+    sleep_since: float | None = None   # monotonic time of last confirmed disconnect (sleep entry)
+    gaps: list = []                    # recent sleep durations (disconnect -> next wake), recent last
+    announced: str | None     = None   # log mode transitions once, not per scan
+    skip_addr: str | None     = None   # macOS: a peripheral to skip for one cycle
+    prev_mono = prev_wall = None       # for macOS system-sleep (monotonic-freeze) detection
     while not stop_event.is_set():
-        # Apply any pending skip exactly once, then clear it so the next
-        # cycle re-tries retrieveConnected (the device may have recovered).
         target = await discover_target(skip_addr=skip_addr)
         skip_addr = None
+
         if not target:
-            if not missing_announced:
-                log("Device not found; scanning frequently, quiet until it wakes...")
-                missing_announced = True
+            now = loop.time()
+            # macOS system sleep freezes the monotonic clock while wall-clock
+            # advances; the learned phase is then meaningless, so drop the anchor
+            # and re-acquire (keep the learned gaps — the cadence itself is valid).
+            wall = time.time()
+            if prev_mono is not None and (wall - prev_wall) - (now - prev_mono) > 30:
+                sleep_since = None
+            prev_mono, prev_wall = now, wall
+
+            # Trust the interval only when the last STABLE_SAMPLES sleeps agree;
+            # recomputing from the recent window tracks the cadence both ways.
+            interval_est = None
+            if len(gaps) >= STABLE_SAMPLES:
+                recent = gaps[-STABLE_SAMPLES:]
+                if min(recent) > 0 and max(recent) <= STABLE_RATIO * min(recent):
+                    interval_est = sum(recent) / len(recent)
+
+            if (interval_est is not None and sleep_since is not None
+                    and (now - sleep_since) < interval_est - PRE_WINDOW):
+                mode, wait = "quiet", IDLE_LONG_PERIOD   # confident + provably asleep; radio mostly free
+            else:
+                mode, wait = "watch", IDLE_SHORT_PERIOD  # approach / cold start / unsure / board gone
+            if mode != announced:
+                announced = mode
+                log(f"Board asleep — light scan every {IDLE_LONG_PERIOD}s; radio mostly free"
+                    if mode == "quiet"
+                    else f"Watching for a wake — scan every {IDLE_SHORT_PERIOD}s")
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                await asyncio.wait_for(stop_event.wait(), timeout=wait)
             except asyncio.TimeoutError:
                 pass
-            backoff = min(backoff * 2, 3)
             continue
-        missing_announced = False
+
+        # Found the board: record the sleep-duration sample, then connect.
+        now = loop.time()
+        prev_mono = prev_wall = None         # reset the sleep-detector baseline after any contact
+        if sleep_since is not None:
+            gap = now - sleep_since          # observed disconnect -> wake duration
+            if MIN_LEARN_GAP <= gap <= MAX_LEARN_GAP:
+                gaps.append(gap)
+                del gaps[:-5]                # keep only the recent few samples
+        announced = None
 
         addr = target if isinstance(target, str) else target.address
         ok = await connect_and_run(target, stop_event)
-        if not ok:
+        if ok:
+            sleep_since = loop.time()        # clean session ended -> board asleep now; anchor here
+        else:
             if sys.platform == "darwin":
-                # No string cache to drop; instead skip this stale handle on
-                # the next retrieveConnected so the scan fallback is reachable.
+                # Stale CoreBluetooth handle: skip it next cycle so the scan
+                # fallback is reachable. Board is awake right now — retry fast.
                 skip_addr = addr
             else:
                 log("Invalidating cached address")
                 SAVED_ADDR_FILE.unlink(missing_ok=True)
             try:
-                await asyncio.wait_for(stop_event.wait(), timeout=backoff)
+                await asyncio.wait_for(stop_event.wait(), timeout=ACTIVE_WAIT)
             except asyncio.TimeoutError:
                 pass
-            backoff = min(backoff * 2, 3)
-        else:
-            backoff = 1
 
 
 if __name__ == "__main__":
