@@ -24,6 +24,15 @@ static UsageData usage = {};
 
 #ifdef BOARD_EPAPER_154G
 #include <esp_sleep.h>
+#include <esp_attr.h>
+
+// Last good usage, kept in RTC slow memory so it survives deep sleep. On a
+// deep-sleep wake we repaint these values BEFORE the first e-paper refresh, so
+// the bistable panel keeps showing the last real numbers instead of the "---"
+// placeholder when a wake fetches no fresh data — otherwise the freshly built
+// "---" frame's hash differs from shown_hash and display_hal_tick commits it to
+// glass (a wasted ~15 s refresh + a "no data" flash on every missed wake).
+RTC_DATA_ATTR static UsageData saved_usage = {};
 
 // ---- Deep-sleep power-nap (battery operation) -------------------------------
 // The JD79667 panel is bistable: it holds its image with zero power, so the
@@ -288,6 +297,15 @@ void setup() {
     // Boot straight to the usage screen (shows the pair hint until the daemon
     // connects). PWR on the usage screen no longer toggles back to the splash.
     ui_show_screen(SCREEN_USAGE);
+    // Deep-sleep wake (timer/button): repaint the last known usage persisted in
+    // RTC, so the panel shows real numbers instead of "---" even when this wake
+    // fetches no fresh data. Runs before the first display_hal_tick, so the
+    // rebuilt frame matches shown_hash and costs no refresh; fresh data later
+    // updates normally. Cold boot (UNDEFINED) has no saved frame → pair hint.
+    if (nap_wake_cause != ESP_SLEEP_WAKEUP_UNDEFINED && saved_usage.valid) {
+        usage = saved_usage;
+        ui_update(&usage);
+    }
 #else
     ui_show_screen(SCREEN_SPLASH);
 #endif
@@ -442,6 +460,9 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+#ifdef BOARD_EPAPER_154G
+            saved_usage = usage;   // persist for repaint on the next deep-sleep wake
+#endif
             ble_send_ack();
         } else {
             ble_send_nack();
