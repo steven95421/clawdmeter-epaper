@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.clawdmeter-daemon-restart</string>
+    <!-- Health-check resurrector: every 120s, relaunch the daemon ONLY if it's
+         dead. Launches via `open -g` (not python directly) so the process keeps
+         the ClawdmeterDaemon.app identity and its Bluetooth TCC grant. Replaces
+         the old weekday-08:30 unconditional pkill+restart, which left the daemon
+         dead through weekends and overnight Mac sleeps. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-c</string>
+        <string>/usr/bin/pgrep -f claude_usage_daemon.py >/dev/null 2>&amp;1 || /usr/bin/open -g "/Applications/ClawdmeterDaemon.app"</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StartInterval</key>
+    <integer>120</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
