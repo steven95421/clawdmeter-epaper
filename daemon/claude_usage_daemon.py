@@ -530,4 +530,18 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        sys.exit(0)
+        pass
+    finally:
+        # bleak's CoreBluetooth backend services callbacks on a separate
+        # dispatch-queue thread ("bleak.corebluetooth"). On Python 3.14, normal
+        # interpreter finalization on the main thread (atexit + OpenSSL
+        # OPENSSL_cleanup) can race with a still-in-flight CoreBluetooth KVO
+        # callback on that thread, which then touches torn-down runtime state →
+        # use-after-free SIGSEGV on shutdown (a "Python quit unexpectedly" crash
+        # report on every exit; with a KeepAlive launchd job, a respawn storm).
+        # We have nothing to flush back (every log line is print(flush=True)), so
+        # skip finalization entirely and _exit() at the kernel level — no
+        # userspace cleanup means no window for the BT thread to fault.
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(0)
