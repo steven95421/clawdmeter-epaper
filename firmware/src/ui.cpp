@@ -221,6 +221,7 @@ static lv_image_dsc_t battery_dscs[5];  // empty, low, medium, full, charging
 static lv_image_dsc_t logo_dsc;
 static screen_t current_screen = SCREEN_USAGE;
 static bool     s_ble_connected = false;   // cached BLE connection state
+static bool     s_has_usage_data = false;  // real numbers shown this boot (incl. RTC repaint)
 static uint32_t connected_at_ms = 0;       // when we last entered CONNECTED ("Connected" dwell)
 
 // Animation state
@@ -680,6 +681,19 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
 
+    // Real numbers exist — they own the panel area from here on. The pairing
+    // hint is only for a device that has never shown data this boot (fresh
+    // pair / cold boot); a mere disconnect must not yank the numbers — the
+    // status line already says Disconnected, and on the nap-cycling e-paper
+    // board the swap would commit a full ~15 s refresh of the pair hint on
+    // every wake (BLE is always disconnected at wake), defeating the
+    // RTC-repaint that keeps the last numbers on glass.
+    s_has_usage_data = true;
+    if (usage_group && pair_group) {
+        lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
+    }
+
     char buf[48];
     set_usage_metric(lbl_session_pct, bar_session, data->session_pct);
     format_reset_time(data->session_reset_mins, buf, sizeof(buf));
@@ -802,10 +816,12 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     bool was_connected = s_ble_connected;
     s_ble_connected = (state == BLE_STATE_CONNECTED);
 
-    // Connected → usage panels; otherwise → pairing hint. The bottom status
-    // line carries the live state word (Connected / Disconnected / Pairing).
+    // Connected, or any real data already shown this boot → usage panels;
+    // otherwise (never had data: fresh pair / cold boot) → pairing hint. The
+    // bottom status line carries the live state word (Connected / Disconnected
+    // / Pairing), so a disconnect is still visible without hiding the numbers.
     if (usage_group && pair_group) {
-        if (s_ble_connected) {
+        if (s_ble_connected || s_has_usage_data) {
             lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
             lv_obj_add_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
         } else {
@@ -815,6 +831,14 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     }
 
     if (s_ble_connected && !was_connected) connected_at_ms = lv_tick_get();
+}
+
+void ui_note_bonds_cleared(void) {
+    s_has_usage_data = false;
+    if (usage_group && pair_group && !s_ble_connected) {
+        lv_obj_add_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 void ui_update_battery(int percent, bool charging) {

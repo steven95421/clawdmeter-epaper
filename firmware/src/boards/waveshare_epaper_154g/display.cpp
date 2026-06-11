@@ -137,11 +137,14 @@ void display_hal_tick(void) {
     if (!dirty || !framebuf) return;
     uint32_t now = millis();
     if (now - last_flush_ms   < SETTLE_MS)      return;   // coalesce the frame
-    if (now - last_refresh_ms < MIN_REFRESH_MS) return;   // floor; keep dirty
-    // Content dedup: only spend a ~15 s refresh when the committed image truly
-    // changed. Skips animation churn that didn't alter the packed framebuffer.
+    // Content dedup BEFORE the refresh floor: an unchanged frame costs nothing,
+    // so it must not wait out MIN_REFRESH_MS — on the deep-sleep board that is
+    // the difference between ~2 s and ~4.5 s awake on every no-change wake
+    // (the nap can't sleep until `dirty` clears). The floor only paces frames
+    // that actually differ and will spend a real refresh.
     uint32_t h = fb_hash();
     if (h == shown_hash) { dirty = false; return; }
+    if (now - last_refresh_ms < MIN_REFRESH_MS) return;   // floor; keep dirty
     epd_display(framebuf);            // blocking full refresh (~15 s)
     shown_hash      = h;
     last_refresh_ms = millis();
