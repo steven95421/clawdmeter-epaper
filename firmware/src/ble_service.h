@@ -19,3 +19,14 @@ void ble_loop();
 // window uses this to decide whether to keep waiting for a state push or bail
 // early when nobody is around.
 bool ble_client_connected();
+
+// Publish a short status blob on the TX characteristic for the daemon to read
+// on connect (we use it to report battery voltage so we can diagnose remotely
+// without a serial cable). Safe to call any time after ble_begin().
+void ble_set_status(const char* json);
+
+// Fully tear down the BLE stack and power down the radio. Called right before
+// the e-paper refresh: the panel's full BWRY update is a current-heavy burst,
+// and on battery the radio + refresh peak together can brown out the rail, so
+// we drop the radio first to leave more headroom.
+void ble_stop();

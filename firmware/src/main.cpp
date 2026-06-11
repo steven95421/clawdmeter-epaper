@@ -231,6 +231,16 @@ void setup() {
     // --- bring BLE up and start advertising ---
     ble_begin("Claude Controller", on_state);
 
+    // Publish this wake's battery voltage (and slope/charge state) on the TX
+    // characteristic so the daemon can log it on connect. This is our only
+    // remote window into vbat once the board runs on battery with no serial
+    // cable attached — used to diagnose whether an EPD refresh browned out.
+    char status[80];
+    snprintf(status, sizeof(status),
+             "{\"vbat\":%.3f,\"pct\":%d,\"chg\":%d,\"dv\":%+.3f,\"miss\":%d}",
+             b.vbat, b.pct, rtc_charging ? 1 : 0, dv, rtc_miss_streak);
+    ble_set_status(status);
+
     bool panel_on = false;
     if (cold_boot) {
         // One-time blank + "waiting for daemon" splash on a real power-on /
@@ -279,6 +289,12 @@ void setup() {
         //  redraw when the fresh push actually differs from what's on screen.)
         bool need_render = !rtc_sig_valid || sig != rtc_render_sig;
         if (need_render) {
+            // Radio OFF before the refresh: the BWRY full update is a current
+            // burst, and on battery the radio + refresh peak together can sag
+            // the rail enough to abort the refresh (the panel then keeps its old
+            // image while the firmware still marks it rendered). We already have
+            // the data and the daemon already read vbat, so BLE is done here.
+            ble_stop();
             if (!panel_on) { display_wake(); panel_on = true; }
             display_render(s);
             rtc_render_sig = sig;

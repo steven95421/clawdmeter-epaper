@@ -1,6 +1,7 @@
 #include "ble_service.h"
 #include <NimBLEDevice.h>
 #include <ArduinoJson.h>
+#include <cstring>
 
 // Match upstream Clawdmeter GATT UUIDs so the daemon stays compatible.
 static const char* DATA_SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001";
@@ -88,3 +89,20 @@ void ble_loop() {
 }
 
 bool ble_client_connected() { return s_connected; }
+
+void ble_set_status(const char* json) {
+    // NOTE: pass an explicit (bytes, length) — NimBLE's templated setValue()
+    // treats a bare const char* as a generic type T and copies sizeof(T) (the
+    // 8-byte pointer), not the string. The byte+length overload sends the text.
+    if (s_tx_char) s_tx_char->setValue((const uint8_t*)json, strlen(json));
+}
+
+void ble_stop() {
+    // deinit(true) stops the host task, tears down the GATT server and powers
+    // down the controller — i.e. the radio is actually off afterwards, not just
+    // idle-advertising. We sleep right after the refresh, so we never need it
+    // back this wake.
+    NimBLEDevice::deinit(true);
+    s_tx_char   = nullptr;
+    s_connected = false;
+}

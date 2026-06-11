@@ -35,6 +35,7 @@ from bleak.exc import BleakError
 DEVICE_NAME = "Claude Controller"
 SERVICE_UUID = "4c41555a-4465-7669-6365-000000000001"
 RX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000002"
+TX_CHAR_UUID = "4c41555a-4465-7669-6365-000000000003"  # board status (vbat, etc.)
 REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"  # optional, future
 
 POLL_INTERVAL = 300
@@ -277,6 +278,19 @@ class Session:
             # Our firmware doesn't expose this char (yet) — fine, we'll just poll.
             log(f"Refresh subscription unavailable (ok): {e}")
 
+    async def read_board_status(self):
+        # Firmware publishes battery voltage (+ charge slope) on the TX char so
+        # we can see vbat over BLE with no serial cable. Best-effort: firmware
+        # that doesn't set it just reports the "ready" placeholder, which we skip.
+        try:
+            raw = await self.client.read_gatt_char(TX_CHAR_UUID)
+        except (BleakError, ValueError) as e:
+            log(f"Board status unavailable (ok): {e}")
+            return
+        text = bytes(raw).decode(errors="replace").strip()
+        if text and text != "ready":
+            log(f"Board: {text}")
+
     async def write_payload(self, payload):
         data = json.dumps(payload, separators=(",", ":")).encode()
         log(f"Sending: {data.decode()}")
@@ -308,6 +322,7 @@ async def connect_and_run(device_or_address, stop_event):
     log("Connected")
     session = Session(client)
     await session.setup_refresh_subscription()
+    await session.read_board_status()
 
     last_poll = 0.0
     used_successfully = False
