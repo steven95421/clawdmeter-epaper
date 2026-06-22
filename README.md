@@ -32,6 +32,8 @@ The device boots into the splash. Tap the screen anywhere to switch to the Usage
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
+**The e-paper board has no splash and no touch.** A full refresh takes ~15 s, so it can't animate — it boots straight to the Usage view and the PWR button no longer toggles screens. It deep-sleeps between updates and keeps the last reading on the bistable panel the whole time it's asleep.
+
 ## Hardware
 
 Boards supported out of the box:
@@ -149,6 +151,8 @@ The board has three side buttons. Left and right send HID keys; the middle (PWR)
 | **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
 
 Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
+
+**On the e-paper board** there are just two buttons: a primary button (GPIO 0) that sends Space over HID while the board is awake, and the PWR side-button (GPIO 18) that wakes it from deep-sleep and, held 3 s then released, enters pairing mode. There's no third button, so no Shift+Tab.
 
 ## BLE protocol
 
