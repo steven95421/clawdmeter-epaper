@@ -24,6 +24,15 @@ static UsageData usage = {};
 
 #ifdef BOARD_EPAPER_154G
 #include <esp_sleep.h>
+#include <esp_attr.h>
+
+// Last good usage, kept in RTC slow memory so it survives deep sleep. On a
+// deep-sleep wake we repaint these values BEFORE the first e-paper refresh, so
+// the bistable panel keeps showing the last real numbers instead of the "---"
+// placeholder when a wake fetches no fresh data — otherwise the freshly built
+// "---" frame's hash differs from shown_hash and display_hal_tick commits it to
+// glass (a wasted ~15 s refresh + a "no data" flash on every missed wake).
+RTC_DATA_ATTR static UsageData saved_usage = {};
 
 // ---- Deep-sleep power-nap (battery operation) -------------------------------
 // The JD79667 panel is bistable: it holds its image with zero power, so the
@@ -38,23 +47,54 @@ extern "C" void board_enter_deep_sleep(uint32_t wake_min);  // waveshare_epaper_
 bool display_hal_idle(void);                                // waveshare_epaper_154g/display.cpp
 
 #define NAP_WAKE_INTERVAL_MIN   15   // deep-sleep wake cadence (minutes); tunable for battery vs freshness
-#define NAP_AWAKE_TIMER_MS      15000UL   // timer wake: cap the wait for a data push
+// Timer wake: cap the wait for a data push. CONTRACT with the host daemon's
+// adaptive scan (daemon/claude_usage_daemon.py: SCAN_TIMEOUT=4 s,
+// IDLE_SHORT_PERIOD=10 s): worst-case detect is ~14 s + ~3 s connect+push
+// ≈ 17 s, so anything below ~18 s here risks systematically missed wakes —
+// change either side only together with the other.
+#define NAP_AWAKE_TIMER_MS      20000UL
 #define NAP_AWAKE_INTERACT_MS   60000UL   // cold/button wake: interaction + flash window
+// Extra wait granted when a central is connected at the deadline but its
+// payload hasn't landed yet — never deep-sleep in the middle of service
+// discovery / a write in flight (the host's bleak then errors with
+// "Service Discovery has not been performed yet" and loses the cycle).
+#define NAP_CONNECTED_GRACE_MS  10000UL
 
 static esp_sleep_wakeup_cause_t nap_wake_cause = ESP_SLEEP_WAKEUP_UNDEFINED;
 static bool     nap_is_timer_wake = false;
 static uint32_t nap_boot_ms       = 0;
-static bool     nap_got_data      = false;
+static bool     nap_got_data      = false;   // fresh BLE payload arrived THIS wake
 static uint32_t nap_got_data_ms   = 0;
+
+// Called from loop() when a BLE payload is applied. This is the ONLY freshness
+// signal: usage.valid is no longer one, because it is restored true from RTC on
+// every wake (saved_usage repaint). Treating restored data as "fetched" made
+// nap_tick sleep ~5 s into a timer wake — before the daemon's watch scan could
+// even detect the advert — so the board went dark for cycles in a row and the
+// display froze on stale numbers.
+static void nap_note_fresh_data(void) {
+    if (!nap_got_data) { nap_got_data = true; nap_got_data_ms = millis(); }
+}
+
+// Current effective wake budget (ms). Shared with the e-paper refresh gate in
+// loop(): refreshes are held until data arrives or this budget elapses, so a
+// timer wake commits at most ONE refresh (never a transient "stale +
+// Disconnected" frame followed by a second refresh with the real data).
+static uint32_t nap_budget_now = NAP_AWAKE_TIMER_MS;
 
 static void nap_tick(void) {
     const uint32_t now = millis();
     if (nap_boot_ms == 0) nap_boot_ms = now;   // first loop = wake epoch
 
-    if (usage.valid && !nap_got_data) { nap_got_data = true; nap_got_data_ms = now; }
-
     const uint32_t awake  = now - nap_boot_ms;
-    const uint32_t budget = nap_is_timer_wake ? NAP_AWAKE_TIMER_MS : NAP_AWAKE_INTERACT_MS;
+    uint32_t budget = nap_is_timer_wake ? NAP_AWAKE_TIMER_MS : NAP_AWAKE_INTERACT_MS;
+    // A central that is connected at the deadline but hasn't delivered yet
+    // gets a bounded grace, so we don't cut an in-flight service discovery.
+    if (nap_is_timer_wake && !nap_got_data
+        && ble_get_state() == BLE_STATE_CONNECTED) {
+        budget += NAP_CONNECTED_GRACE_MS;
+    }
+    nap_budget_now = budget;
 
     bool sleep_now = false;
     if (nap_is_timer_wake && nap_got_data && display_hal_idle()
@@ -288,6 +328,15 @@ void setup() {
     // Boot straight to the usage screen (shows the pair hint until the daemon
     // connects). PWR on the usage screen no longer toggles back to the splash.
     ui_show_screen(SCREEN_USAGE);
+    // Deep-sleep wake (timer/button): repaint the last known usage persisted in
+    // RTC, so the panel shows real numbers instead of "---" even when this wake
+    // fetches no fresh data. Runs before the first display_hal_tick, so the
+    // rebuilt frame matches shown_hash and costs no refresh; fresh data later
+    // updates normally. Cold boot (UNDEFINED) has no saved frame → pair hint.
+    if (nap_wake_cause != ESP_SLEEP_WAKEUP_UNDEFINED && saved_usage.valid) {
+        usage = saved_usage;
+        ui_update(&usage);
+    }
 #else
     ui_show_screen(SCREEN_SPLASH);
 #endif
@@ -327,6 +376,7 @@ static void pair_tick(void) {
         if (pair_state == PAIR_ARMED) {
             Serial.println("Pair: released in window — clearing bonds, advertising");
             ble_clear_bonds();
+            ui_note_bonds_cleared();   // pairing hint takes the panels back over
         } else {
             Serial.println("Pair: released too early — cancelled");
         }
@@ -355,7 +405,22 @@ void loop() {
     // Rotation transition (blank + ramp) would fight the idle fade — skip
     // ticks while the panel is dark. A rotation that happens during sleep
     // is detected by the next tick after wake and ramped in then.
+#ifdef BOARD_EPAPER_154G
+    // Timer wakes: hold the (~15 s, blocking) e-paper refresh until the fresh
+    // payload arrived or the wake budget elapsed. Each wake then commits at
+    // most one refresh: the final frame (fresh numbers + Tracking), or — only
+    // on a genuinely missed wake — the honest "last numbers + Disconnected".
+    // Without this gate, any wake where the daemon needs >4 s to connect
+    // first committed a transient stale+Disconnected frame and then refreshed
+    // again when the data landed (double ~15 s refresh on most wakes).
+    {
+        const bool refresh_ok = !nap_is_timer_wake || nap_got_data
+            || (nap_boot_ms != 0 && millis() - nap_boot_ms > nap_budget_now);
+        if (!idle_is_asleep() && refresh_ok) display_hal_tick();
+    }
+#else
     if (!idle_is_asleep()) display_hal_tick();
+#endif
 
     // ---- Physical buttons ----
     //   PRIMARY   → HID Space  (Claude Code voice-mode PTT)
@@ -442,6 +507,10 @@ void loop() {
                 if (splash_is_active()) splash_pick_for_current_rate();
             }
             ui_update(&usage);
+#ifdef BOARD_EPAPER_154G
+            saved_usage = usage;    // persist for repaint on the next deep-sleep wake
+            nap_note_fresh_data();  // freshness signal for the nap scheduler
+#endif
             ble_send_ack();
         } else {
             ble_send_nack();

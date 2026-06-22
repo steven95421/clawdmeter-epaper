@@ -1,0 +1,18 @@
+# Python deps for claude_usage_daemon.py (macOS BLE host daemon).
+# Pinned to the versions that ran in production on the original host.
+# NOTE: bleak 1.1.1's CoreBluetooth backend dropped CentralManagerDelegate.
+# wait_until_ready — the daemon already handles that (logs the dead macOS
+# system-connected fast-path once and falls back to scan-by-name).
+#
+# Recreate the env on a new machine:
+#   python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
+#   ./.venv/bin/python3 claude_usage_daemon.py
+# (The /Applications/ClawdmeterDaemon.app wrapper is just a launcher around
+#  this venv + script; the LaunchAgents in launchd/ can instead point straight
+#  at .venv/bin/python3 + this script if you don't rebuild the .app.)
+bleak==1.1.1
+httpx==0.28.1
+pyobjc-core==11.1
+pyobjc-framework-Cocoa==11.1
+pyobjc-framework-CoreBluetooth==11.1
+pyobjc-framework-libdispatch==11.1

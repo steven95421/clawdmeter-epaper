@@ -2,9 +2,18 @@
 
 A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
 
-It runs on a [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786) as well as a few other alternative boards and pairs over Bluetooth, the splash screen plays pixel-art Clawd animations that get
-busier when your usage rate climbs. The two side buttons send Space and
-Shift+Tab over BLE HID for Claude Code's voice mode and mode-toggle shortcuts.
+The board in the photo is a **Waveshare ESP32-S3-ePaper-1.54G** — a 200×200
+four-colour (black / white / red / yellow) e-paper panel. It runs on battery:
+the firmware deep-sleeps between refreshes and wakes about every 15 minutes to
+pull the latest usage over Bluetooth and repaint, so a charge lasts weeks and
+the bistable panel keeps showing the last reading even while it sleeps. Hold the
+power button for 3 seconds to put it into pairing mode.
+
+It also runs on the [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)
+and a few other AMOLED boards, which add a touch screen, a pixel-art Clawd
+splash animation that gets busier as your usage rate climbs, and two side
+buttons that send Space and Shift+Tab over BLE HID for Claude Code's voice mode
+and mode-toggle shortcuts.
 
 |              Usage meter              |              Clawd animation screen              |
 | :-----------------------------------: | :----------------------------------------------: |
@@ -23,10 +32,13 @@ The device boots into the splash. Tap the screen anywhere to switch to the Usage
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
+**The e-paper board has no splash and no touch.** A full refresh takes ~15 s, so it can't animate — it boots straight to the Usage view and the PWR button no longer toggles screens. It deep-sleeps between updates and keeps the last reading on the bistable panel the whole time it's asleep.
+
 ## Hardware
 
 Boards supported out of the box:
 
+- [Waveshare ESP32-S3-ePaper-1.54G](https://github.com/waveshareteam/ESP32-S3-ePaper-1.54) — 200×200 four-colour e-paper; battery + deep-sleep, no touch, no splash animation
 - [Waveshare ESP32-S3-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-s3-touch-amoled-2.16.htm?&aff_id=149786)
 - [Waveshare ESP32-C6-Touch-AMOLED-2.16](https://www.waveshare.com/esp32-c6-touch-amoled-2.16.htm?&aff_id=149786) 
 - [Waveshare ESP32-S3-Touch-AMOLED-1.8](https://www.waveshare.com/esp32-s3-touch-amoled-1.8.htm?&aff_id=149786)
@@ -139,6 +151,8 @@ The board has three side buttons. Left and right send HID keys; the middle (PWR)
 | **Right**        | GPIO 18      | Press to send Shift+Tab (Claude Code mode toggle)              |
 
 Space and Shift+Tab go out as standard BLE HID keyboard reports, so they trigger in whatever window has focus on the paired host — not just Claude Code.
+
+**On the e-paper board** there are just two buttons: a primary button (GPIO 0) that sends Space over HID while the board is awake, and the PWR side-button (GPIO 18) that wakes it from deep-sleep and, held 3 s then released, enters pairing mode. There's no third button, so no Shift+Tab.
 
 ## BLE protocol
 
