@@ -17,6 +17,7 @@ import signal
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 import httpx
@@ -527,10 +528,18 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
+    exit_code = 0
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except Exception:
+        # os._exit() below skips normal finalization, so Python would never
+        # print this traceback on its own — log it ourselves and exit non-zero
+        # so an unhandled crash is visible (in the log and to anything watching
+        # the exit code) instead of looking like a clean shutdown.
+        traceback.print_exc()
+        exit_code = 1
     finally:
         # bleak's CoreBluetooth backend services callbacks on a separate
         # dispatch-queue thread ("bleak.corebluetooth"). On Python 3.14, normal
@@ -544,4 +553,4 @@ if __name__ == "__main__":
         # userspace cleanup means no window for the BT thread to fault.
         sys.stdout.flush()
         sys.stderr.flush()
-        os._exit(0)
+        os._exit(exit_code)
