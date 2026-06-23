@@ -280,6 +280,26 @@ async def discover_target(skip_addr: str | None = None):
     return address
 
 
+def pct(util: str) -> int:
+    """Rate-limit utilisation header (e.g. "0.45") -> integer percent (45).
+    Non-numeric / missing -> 0."""
+    try:
+        return int(round(float(util) * 100))
+    except ValueError:
+        return 0
+
+
+def reset_minutes(reset_ts: str, now: float) -> int:
+    """Reset-timestamp header (unix seconds, as a string) -> whole minutes from
+    `now` until reset, clamped at 0 (never negative). Non-numeric -> 0."""
+    try:
+        r = float(reset_ts)
+    except ValueError:
+        return 0
+    mins = (r - now) / 60.0
+    return int(round(mins)) if mins > 0 else 0
+
+
 async def poll_api(token: str) -> dict | None:
     headers = dict(API_HEADERS_TEMPLATE)
     headers["Authorization"] = f"Bearer {token}"
@@ -297,26 +317,11 @@ async def poll_api(token: str) -> dict | None:
         return resp.headers.get(name, default)
 
     now = time.time()
-
-    def reset_minutes(reset_ts: str) -> int:
-        try:
-            r = float(reset_ts)
-        except ValueError:
-            return 0
-        mins = (r - now) / 60.0
-        return int(round(mins)) if mins > 0 else 0
-
-    def pct(util: str) -> int:
-        try:
-            return int(round(float(util) * 100))
-        except ValueError:
-            return 0
-
     payload = {
         "s": pct(hdr("anthropic-ratelimit-unified-5h-utilization")),
-        "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset")),
+        "sr": reset_minutes(hdr("anthropic-ratelimit-unified-5h-reset"), now),
         "w": pct(hdr("anthropic-ratelimit-unified-7d-utilization")),
-        "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset")),
+        "wr": reset_minutes(hdr("anthropic-ratelimit-unified-7d-reset"), now),
         "st": hdr("anthropic-ratelimit-unified-5h-status", "unknown"),
         "ok": True,
     }
@@ -406,6 +411,46 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
     return used_successfully
 
 
+# --- Anchored low-duty scan scheduling (pure decision helpers, unit-tested) ---
+# Tunables for the away-scan cadence; see the main() loop for how they're used.
+IDLE_SHORT_PERIOD = 10    # "watch" wait; dead gap < 15 s timer window (detect + ~3 s connect)
+IDLE_LONG_PERIOD  = 45    # "quiet" wait (confident + provably asleep); < 60 s button window
+ACTIVE_WAIT       = 2     # s between rapid retries right after a failed connect
+PRE_WINDOW        = 90    # s before the predicted wake to switch from "quiet" to "watch"
+MIN_LEARN_GAP     = 120   # s: ignore sleep gaps below this (rapid retries / very short)
+MAX_LEARN_GAP     = 3600  # s: ignore implausibly long gaps (daemon / Mac downtime)
+STABLE_SAMPLES    = 2     # consecutive consistent sleep gaps required to trust the cadence
+STABLE_RATIO      = 1.3   # "consistent" = max/min of those recent gaps within this ratio
+
+
+def stable_interval(gaps: list) -> float | None:
+    """Mean of the last STABLE_SAMPLES sleep gaps, but only when they agree
+    (max/min within STABLE_RATIO). Returns None when the cadence isn't yet
+    trustworthy (too few samples, or inconsistent) — the caller then keeps
+    scanning tightly rather than trusting a guessed wake time."""
+    if len(gaps) < STABLE_SAMPLES:
+        return None
+    recent = gaps[-STABLE_SAMPLES:]
+    if min(recent) > 0 and max(recent) <= STABLE_RATIO * min(recent):
+        return sum(recent) / len(recent)
+    return None
+
+
+def decide_scan_mode(gaps: list, sleep_since: float | None, now: float):
+    """Pick the away-scan cadence. Returns (mode, wait_seconds):
+      * ("quiet", IDLE_LONG_PERIOD) only when the cadence is trusted AND we're
+        provably still asleep — more than PRE_WINDOW before the next predicted
+        wake — so a long poll can't straddle the board's ~15 s advert window.
+      * ("watch", IDLE_SHORT_PERIOD) otherwise: cold start, unknown / changing
+        cadence, approaching a wake, or right after a missed wake.
+    Pure function of the learned gaps + the last anchor; unit-tested."""
+    interval_est = stable_interval(gaps)
+    if (interval_est is not None and sleep_since is not None
+            and (now - sleep_since) < interval_est - PRE_WINDOW):
+        return "quiet", IDLE_LONG_PERIOD
+    return "watch", IDLE_SHORT_PERIOD
+
+
 async def main() -> None:
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -447,15 +492,7 @@ async def main() -> None:
     # recent window, so it tracks the true cadence in BOTH directions; a one-off
     # button / missed-wake gap breaks consistency -> we fall back to "watch",
     # which only costs duty, never a missed wake.
-    IDLE_SHORT_PERIOD = 10    # "watch" wait; dead gap < 15 s timer window (detect + ~3 s connect)
-    IDLE_LONG_PERIOD  = 45    # "quiet" wait (confident + provably asleep); < 60 s button window
-    ACTIVE_WAIT       = 2     # s between rapid retries right after a failed connect
-    PRE_WINDOW        = 90    # s before the predicted wake to switch from "quiet" to "watch"
-    MIN_LEARN_GAP     = 120   # s: ignore sleep gaps below this (rapid retries / very short)
-    MAX_LEARN_GAP     = 3600  # s: ignore implausibly long gaps (daemon / Mac downtime)
-    STABLE_SAMPLES    = 2     # consecutive consistent sleep gaps required to trust the cadence
-    STABLE_RATIO      = 1.3   # "consistent" = max/min of those recent gaps within this ratio
-
+    # (scan-scheduling constants + decide_scan_mode() are module-level, above)
     sleep_since: float | None = None   # monotonic time of last confirmed disconnect (sleep entry)
     gaps: list = []                    # recent sleep durations (disconnect -> next wake), recent last
     announced: str | None     = None   # log mode transitions once, not per scan
@@ -475,19 +512,7 @@ async def main() -> None:
                 sleep_since = None
             prev_mono, prev_wall = now, wall
 
-            # Trust the interval only when the last STABLE_SAMPLES sleeps agree;
-            # recomputing from the recent window tracks the cadence both ways.
-            interval_est = None
-            if len(gaps) >= STABLE_SAMPLES:
-                recent = gaps[-STABLE_SAMPLES:]
-                if min(recent) > 0 and max(recent) <= STABLE_RATIO * min(recent):
-                    interval_est = sum(recent) / len(recent)
-
-            if (interval_est is not None and sleep_since is not None
-                    and (now - sleep_since) < interval_est - PRE_WINDOW):
-                mode, wait = "quiet", IDLE_LONG_PERIOD   # confident + provably asleep; radio mostly free
-            else:
-                mode, wait = "watch", IDLE_SHORT_PERIOD  # approach / cold start / unsure / board gone
+            mode, wait = decide_scan_mode(gaps, sleep_since, now)
             if mode != announced:
                 announced = mode
                 log(f"Board asleep — light scan every {IDLE_LONG_PERIOD}s; radio mostly free"
