@@ -1,11 +1,11 @@
-"""Unit tests for the pure logic in claude_usage_daemon.py.
+"""Unit tests for the pure logic in usage_logic.py.
 
-Only stdlib + the daemon's own pure helpers are exercised — no network,
-Bluetooth, Keychain, or files are touched. The daemon module is imported, so
-run this under the daemon venv (which has the bleak/httpx it imports):
+Pure, stdlib-only — no network, Bluetooth, Keychain, or files are touched, and
+the BLE daemon module is NOT imported, so this runs with any Python 3 (no venv,
+no bleak/httpx):
 
-    daemon/.venv/bin/python3 daemon/tests/test_logic.py
-    # or: daemon/.venv/bin/python3 -m unittest discover -s daemon/tests
+    python3 daemon/tests/test_logic.py
+    # or: python3 -m unittest discover -s daemon/tests
 """
 
 import os
@@ -14,14 +14,14 @@ import unittest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from claude_usage_daemon import (  # noqa: E402
+from usage_logic import (  # noqa: E402
+    decide_scan_mode,
+    extract_access_token as _extract_access_token,
     pct,
     reset_minutes,
     stable_interval,
-    decide_scan_mode,
-    _extract_access_token,
-    IDLE_SHORT_PERIOD,
     IDLE_LONG_PERIOD,
+    IDLE_SHORT_PERIOD,
     PRE_WINDOW,
     STABLE_RATIO,
 )
