@@ -1,0 +1,51 @@
+name: tests
+
+on:
+  push:
+    branches: [epaper-154g-color, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  daemon-python:
+    name: daemon unit tests (Python, stdlib only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      # usage_logic.py is dependency-free (no bleak/httpx), so no pip install.
+      - run: python3 daemon/tests/test_logic.py
+
+  firmware-native:
+    name: firmware pure-logic tests (g++)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + run native unit tests
+        run: |
+          c++ -std=c++17 -Wall -Wextra \
+            -I firmware/src -I firmware/src/boards/waveshare_epaper_154g \
+            firmware/test_native/test_pure.cpp -o test_pure
+          ./test_pure
+
+  firmware-build:
+    name: firmware build (verifies the on-target compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('firmware/platformio.ini') }}
+      - run: pip install --upgrade platformio
+      # lib_deps are fetched from the PlatformIO registry (the vendored
+      # firmware/lib/ is a local offline-build workaround and is untracked).
+      - run: pio run -d firmware -e waveshare_epaper_154g
