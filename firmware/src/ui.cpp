@@ -4,6 +4,7 @@
 #include "logo.h"
 #include "icons.h"
 #include "hal/board_caps.h"
+#include "reset_time_format.h"   // format_reset_time (extracted; unit-tested)
 
 // Custom fonts (scaled for 314 PPI, ~1.9x from original 165 PPI)
 LV_FONT_DECLARE(font_tiempos_56);
@@ -297,23 +298,8 @@ static lv_color_t pct_color(float pct) {
     return COL_GREEN;
 }
 
-static void format_reset_time(int mins, char* buf, size_t len) {
-#ifdef BOARD_EPAPER_154G
-    // Coarsen to 15-min steps: a per-minute countdown would re-render the
-    // label every minute, and each e-paper full refresh is ~15 s — that reads
-    // as constant flashing. Rounding makes the label change ~once per 15 min.
-    if (mins > 0) { mins = ((mins + 7) / 15) * 15; if (mins < 15) mins = 15; }
-#endif
-    if (mins < 0) {
-        snprintf(buf, len, "---");
-    } else if (mins < 60) {
-        snprintf(buf, len, "Resets in %dm", mins);
-    } else if (mins < 1440) {
-        snprintf(buf, len, "Resets in %dh %dm", mins / 60, mins % 60);
-    } else {
-        snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
-    }
-}
+// format_reset_time() is defined in reset_time_format.h (included above),
+// extracted so the label formatting can be unit-tested off-target.
 
 // Forward decls — callbacks defined near ui_show_screen below
 static void global_click_cb(lv_event_t* e);

@@ -4,16 +4,13 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <string.h>
+#include "bwry_classify.h"   // classify_rgb565 + EPD_DITHER_ORANGE (extracted; unit-tested)
 
 // 2bpp BWRY framebuffer: 200x200, 4 px/byte, 50-byte rows = 10000 bytes.
 #define FB_BYTES   EPD_FRAMEBUF_BYTES
 
-// Sentinel returned by classify_rgb565 for the "orange" bar tier. Orange is
-// NOT a native JD79667 ink, so it is resolved into a per-pixel YELLOW+RED
-// checkerboard in draw_bitmap (which has the x/y needed for the dither). The
-// value sits outside the valid 2-bit code range (0..3) so it can never be
-// packed into the framebuffer by accident.
-#define EPD_DITHER_ORANGE 0xFE
+// EPD_DITHER_ORANGE + classify_rgb565 now live in bwry_classify.h (included
+// above) so the BWRY classifier can be unit-tested off-target.
 
 // Full-refresh-only panel: every commit is a ~15 s blocking refresh, so we
 // (a) coalesce an LVGL frame (SETTLE_MS), (b) keep a floor between refreshes,
@@ -35,47 +32,8 @@ static uint32_t last_refresh_ms = 0;
 // a cold boot, where display_hal_begin() reseeds it from the white frame.
 RTC_DATA_ATTR static uint32_t shown_hash = 0;
 
-// ---- RGB565 -> 2-bit BWRY classifier (hue + luminance, role-inverting) ----
-// The shared UI is a DARK theme (light text on near-black bg), natural on
-// AMOLED but inverted for paper-white e-paper. We map by ROLE: dark
-// backgrounds -> WHITE paper, light text -> BLACK ink. Warm foreground inks
-// are caught by hue first so the real RED (high usage / disconnected) and
-// YELLOW (medium usage / status accent) survive instead of collapsing to ink.
-// Verified against the theme tokens:
-//   BG 0x000000 / PANEL 0x1f1f1e / BAR_BG 0x2a2a28  (lum 0/30/40)  -> WHITE
-//   TEXT 0xfaf9f5 / DIM 0xb0aea5                     (lum 249/175) -> BLACK
-//   GREEN 0x788c5d  (low usage, lum 128)                           -> BLACK
-//   AMBER/ACCENT 0xd97757 (medium usage / status)                  -> YELLOW
-//   RED 0xc0392b   (high usage / disconnected)                     -> RED
-static inline uint8_t classify_rgb565(uint16_t p) {
-    uint8_t r = ((p >> 11) & 0x1F) << 3;   // 0..248
-    uint8_t g = ((p >>  5) & 0x3F) << 2;   // 0..252
-    uint8_t b = ( p        & 0x1F) << 3;   // 0..248
-    // Orange sentinel (bar "warning" tier) -> dithered YELLOW+RED. Tight band
-    // around 0xff7f00 (HAL-expanded r=248,g=124,b=0) so it never catches the
-    // terra-cotta accent (r=217) or the alert red (r=192). Resolved to a
-    // per-pixel checkerboard in draw_bitmap, which has the x/y coords.
-    if (r >= 240 && g >= 100 && g <= 150 && b < 40)
-        return EPD_DITHER_ORANGE;
-    // Warm (red-dominant) foreground -> RED, or YELLOW when green is also high.
-    if (r >= 100 && r > g + 40 && r > b + 40) {
-        // True yellow pigment has LOW blue (0xf5c518 -> b=24). A warm pixel
-        // with HIGH blue is a desaturated RED+near-white blend — the anti-alias
-        // fringe where the red pill fill meets its light "black" border
-        // (COL_TEXT). Without this guard those mid-blends classify YELLOW and
-        // paint a yellow halo that breaks the rounded black outline ("gaps").
-        // Low blue -> real YELLOW; low green -> RED; otherwise fall through to
-        // the luminance branch, where these high-blue fringes resolve to solid
-        // BLACK and the outline stays continuous.
-        if (g >= 90 && b < 80) return EPD_YELLOW;
-        if (g < 90)            return EPD_RED;
-    }
-    // Greyscale: luminance inversion. Bright (text/icons) -> black ink; dark
-    // (bg/panel/bar-track) -> white paper. Threshold 64 sits between the
-    // darkest foreground and the lightest background of the theme palette.
-    uint32_t lum = ((uint32_t)r * 77 + (uint32_t)g * 150 + (uint32_t)b * 29) >> 8;
-    return (lum >= 64) ? EPD_BLACK : EPD_WHITE;
-}
+// classify_rgb565() is defined in bwry_classify.h (included above), extracted
+// so the BWRY mapping can be unit-tested off-target.
 
 static inline void put_px(int px, int py, uint8_t code) {
     uint8_t* byte  = &framebuf[py * EPD_BYTES_PER_ROW + (px >> 2)];
