@@ -47,8 +47,17 @@ POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 4.0  # short scans cut BT-radio occupancy; a board advert is seen in <1s
 
-# macOS: token lives in Keychain (service "Claude Code-credentials").
+# macOS: token lives in the Keychain. We try our OWN item first so the daemon
+# can't be starved by whatever else writes to Claude Code's shared item —
+# observed 2026-06: an MCP OAuth flow replaced "Claude Code-credentials" with an
+# mcpOAuth-only blob carrying no accessToken, and the daemon logged "No token;
+# skipping poll" every poll while BLE kept connecting normally (board froze on
+# its last numbers). Create the dedicated item with:
+#   read -rs TOKEN && security add-generic-password -U \
+#     -s "Clawdmeter-claude-token" -a "$USER" -T /usr/bin/security -w "$TOKEN"
+# The shared item stays as a fallback so existing installs keep working.
 # Linux: token lives in ~/.claude/.credentials.json.
+KEYCHAIN_SERVICE_OWN = "Clawdmeter-claude-token"
 KEYCHAIN_SERVICE = "Claude Code-credentials"
 CREDENTIALS_PATH = Path.home() / ".claude" / ".credentials.json"
 SAVED_ADDR_FILE = Path.home() / ".config" / "claude-usage-monitor" / "ble-address"
@@ -71,30 +80,48 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+_keychain_warned: set = set()   # log each dud source once per run, not per poll
+
+
 def _read_token_keychain() -> str | None:
-    try:
-        out = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-s",
-                KEYCHAIN_SERVICE,
-                "-a",
-                getpass.getuser(),
-                "-w",
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except subprocess.CalledProcessError as e:
-        log(f"Keychain read failed (rc={e.returncode}): {e.stderr.strip()}")
-        return None
-    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
-        log(f"Keychain access error: {e}")
-        return None
-    return _extract_access_token(out.stdout)
+    """Read the token from the Keychain: our own item first, then the shared
+    Claude Code one. Returns None only when neither yields an accessToken."""
+    for service in (KEYCHAIN_SERVICE_OWN, KEYCHAIN_SERVICE):
+        try:
+            out = subprocess.run(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    service,
+                    "-a",
+                    getpass.getuser(),
+                    "-w",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except subprocess.CalledProcessError as e:
+            # rc 44 = "item not found", the expected state when the dedicated
+            # item hasn't been created — try the next source without logging.
+            if e.returncode != 44 and service not in _keychain_warned:
+                _keychain_warned.add(service)
+                log(f"Keychain read failed for {service!r} "
+                    f"(rc={e.returncode}): {e.stderr.strip()}")
+            continue
+        except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+            log(f"Keychain access error: {e}")
+            return None
+        token = _extract_access_token(out.stdout)
+        if token:
+            return token
+        if service not in _keychain_warned:
+            _keychain_warned.add(service)
+            log(f"Keychain item {service!r} exists but carries no accessToken "
+                f"(overwritten by another writer?); trying the next source")
+    return None
 
 
 def _read_token_file() -> str | None:
