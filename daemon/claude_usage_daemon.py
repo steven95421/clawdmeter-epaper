@@ -260,33 +260,52 @@ async def retrieve_connected_macos(skip_addr: str | None = None):
     return None
 
 
-async def discover_target(skip_addr: str | None = None):
-    """Return a connectable target, or None.
+def target_addr(target) -> str:
+    """Address of a discovery result (a BLEDevice on macOS, a str elsewhere)."""
+    return target if isinstance(target, str) else target.address
 
-    macOS: prefer the system-connected peripheral (HID-grabbed devices are
-    invisible to scans); fall back to a normal scan that yields a BLEDevice
-    so the subsequent connect doesn't have to re-scan. ``skip_addr`` is
-    forwarded so a just-failed peripheral is skipped, making the scan
-    fallback reachable.
+
+async def discover_targets(skip_addr: str | None = None) -> list:
+    """Return EVERY connectable target seen this scan (possibly empty).
+
+    Several boards can advertise the same name. find_device_by_name() returns
+    whichever is seen first and hides the rest, which STARVED the second board
+    (observed 2026-08-25: one board sat 4h45m on stale numbers while the other
+    was fed every 15 min), so enumerate them all and let the caller pick fairly.
+
+    macOS: the system-connected peripheral comes first (HID-grabbed devices are
+    invisible to scans), then everything matching DEVICE_NAME in a full scan.
+    ``skip_addr`` drops a just-failed peripheral for one cycle.
 
     Other platforms: keep the original cached-address / scan-by-name flow.
     A freshly scanned address is cached here (the only place it's saved).
     """
     if sys.platform == "darwin":
+        targets = []
         dev = await retrieve_connected_macos(skip_addr=skip_addr)
         if dev is not None:
-            return dev
-        dev = await BleakScanner.find_device_by_name(DEVICE_NAME, timeout=SCAN_TIMEOUT)
-        if dev:
-            log(f"Found: {dev.address}")
-        return dev
+            targets.append(dev)
+        seen = {target_addr(t) for t in targets}
+        for d in await BleakScanner.discover(timeout=SCAN_TIMEOUT):
+            if d.name != DEVICE_NAME or d.address in seen or d.address == skip_addr:
+                continue
+            seen.add(d.address)
+            log(f"Found: {d.address}")
+            targets.append(d)
+        return targets
 
     address = load_cached_address()
     if not address:
         address = await scan_for_device()
         if address:
             save_address(address)  # cache only freshly-scanned addresses
-    return address
+    return [address] if address else []
+
+
+async def discover_target(skip_addr: str | None = None):
+    """First target from discover_targets(), or None. Kept for helper scripts."""
+    targets = await discover_targets(skip_addr=skip_addr)
+    return targets[0] if targets else None
 
 
 async def poll_api(token: str) -> dict | None:
@@ -447,11 +466,12 @@ async def main() -> None:
     announced: str | None     = None   # log mode transitions once, not per scan
     skip_addr: str | None     = None   # macOS: a peripheral to skip for one cycle
     prev_mono = prev_wall = None       # for macOS system-sleep (monotonic-freeze) detection
+    last_fed: dict = {}                # board address -> when we last fed it (fairness)
     while not stop_event.is_set():
-        target = await discover_target(skip_addr=skip_addr)
+        targets = await discover_targets(skip_addr=skip_addr)
         skip_addr = None
 
-        if not target:
+        if not targets:
             now = loop.time()
             # macOS system sleep freezes the monotonic clock while wall-clock
             # advances; the learned phase is then meaningless, so drop the anchor
@@ -473,7 +493,7 @@ async def main() -> None:
                 pass
             continue
 
-        # Found the board: record the sleep-duration sample, then connect.
+        # Found at least one board: record the sleep-duration sample, then feed.
         now = loop.time()
         prev_mono = prev_wall = None         # reset the sleep-detector baseline after any contact
         if sleep_since is not None:
@@ -483,9 +503,15 @@ async def main() -> None:
                 del gaps[:-5]                # keep only the recent few samples
         announced = None
 
-        addr = target if isinstance(target, str) else target.address
+        # With several boards up, serve the one that has waited longest: a
+        # session takes ~60 s, longer than a board's advert window, so we feed
+        # one per pass and the loop re-scans immediately — a board still awake
+        # is picked up on the very next pass instead of being starved.
+        target = min(targets, key=lambda t: last_fed.get(target_addr(t), 0.0))
+        addr = target_addr(target)
         ok = await connect_and_run(target, stop_event)
         if ok:
+            last_fed[addr] = loop.time()     # fairness bookkeeping across boards
             sleep_since = loop.time()        # clean session ended -> board asleep now; anchor here
         else:
             if sys.platform == "darwin":
