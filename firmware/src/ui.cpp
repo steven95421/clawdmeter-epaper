@@ -209,6 +209,11 @@ static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 #ifdef BOARD_EPAPER_154G
+static constexpr int QUOTA_BAR_X = 31;
+static constexpr int QUOTA_BAR_W = 94;
+static constexpr int RESET_TICK_W = 5;
+static lv_obj_t* panel_claude;
+static lv_obj_t* panel_codex;
 static lv_obj_t* row_claude_session;
 static lv_obj_t* row_claude_weekly;
 static lv_obj_t* row_codex_session;
@@ -467,15 +472,16 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
 }
 
 #ifdef BOARD_EPAPER_154G
-// One provider card for the 200x200 display. A row owns its window label,
-// remaining %, and reset countdown so the entire row can be hidden when that
-// quota window is not exposed by the provider.
+// One provider card for the 200x200 display. The capsule shows remaining quota;
+// the red tick overlays time remaining until reset. Both deplete toward the
+// left, so their relative positions reveal whether usage is ahead of pace.
 static lv_obj_t* make_provider_row(lv_obj_t* panel, int y, const char* window,
                                    lv_obj_t** out_pct, lv_obj_t** out_bar,
                                    lv_obj_t** out_reset) {
     lv_obj_t* row = lv_obj_create(panel);
     lv_obj_set_pos(row, 0, y);
-    lv_obj_set_size(row, L.content_w - 2 * L.panel_hpad, 28);
+    const int row_w = L.content_w - 2 * L.panel_hpad;
+    lv_obj_set_size(row, row_w, 24);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
@@ -486,39 +492,59 @@ static lv_obj_t* make_provider_row(lv_obj_t* panel, int y, const char* window,
     lv_label_set_text(window_lbl, window);
     lv_obj_set_style_text_font(window_lbl, &font_styrene_20, 0);
     lv_obj_set_style_text_color(window_lbl, COL_DIM, 0);
-    lv_obj_set_pos(window_lbl, 0, 4);
+    lv_obj_set_pos(window_lbl, 0, 2);
 
     *out_pct = lv_label_create(row);
     lv_label_set_text(*out_pct, "--");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_28, 0);
+    lv_obj_set_style_text_font(*out_pct, &font_styrene_24, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
-    lv_obj_set_pos(*out_pct, 34, 0);
+    lv_obj_set_width(*out_pct, 45);
+    lv_obj_set_style_text_align(*out_pct, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_pos(*out_pct, 131, 0);
 
-    // The percentage already communicates the same quantity as a progress
-    // bar. Omit the duplicate visual and spend that width on legible numbers.
-    *out_bar = NULL;
+    *out_bar = make_bar(row, QUOTA_BAR_X, 4, QUOTA_BAR_W, 16);
+    lv_obj_set_style_border_color(*out_bar, COL_TEXT, LV_PART_MAIN);
+    lv_obj_set_style_border_width(*out_bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_radius(*out_bar, 8, LV_PART_MAIN);
+    lv_obj_set_style_radius(*out_bar, 8, LV_PART_INDICATOR);
 
-    *out_reset = lv_label_create(row);
-    lv_label_set_text(*out_reset, "--");
-    lv_obj_set_width(*out_reset, 75);
-    lv_label_set_long_mode(*out_reset, LV_LABEL_LONG_MODE_CLIP);
-    lv_obj_set_style_text_align(*out_reset, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_20, 0);
-    lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
-    lv_obj_set_pos(*out_reset, 101, 4);
+    // On the 154G these legacy "reset label" pointers own graphical ticks.
+    // Other board layouts continue to use real reset labels.
+    *out_reset = lv_obj_create(row);
+    lv_obj_set_size(*out_reset, RESET_TICK_W, 24);
+    lv_obj_set_pos(*out_reset, QUOTA_BAR_X, 0);
+    lv_obj_set_style_bg_color(*out_reset, COL_TEXT, 0);
+    lv_obj_set_style_bg_opa(*out_reset, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(*out_reset, 0, 0);
+    lv_obj_set_style_radius(*out_reset, 0, 0);
+    lv_obj_set_style_pad_all(*out_reset, 0, 0);
+    lv_obj_clear_flag(*out_reset, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Dual-tone cursor: red core stays visible on black/yellow fills; black
+    // rails remain visible when a critically low quota makes the bar red.
+    lv_obj_t* tick_core = lv_obj_create(*out_reset);
+    lv_obj_set_size(tick_core, 3, 24);
+    lv_obj_set_pos(tick_core, 1, 0);
+    lv_obj_set_style_bg_color(tick_core, COL_RED, 0);
+    lv_obj_set_style_bg_opa(tick_core, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(tick_core, 0, 0);
+    lv_obj_set_style_radius(tick_core, 0, 0);
+    lv_obj_set_style_pad_all(tick_core, 0, 0);
+    lv_obj_clear_flag(tick_core, LV_OBJ_FLAG_SCROLLABLE);
     return row;
 }
 
-static void make_provider_panel(lv_obj_t* parent, int y, const char* provider,
-                                lv_color_t provider_color,
-                                lv_obj_t** out_short_row,
-                                lv_obj_t** out_short_pct,
-                                lv_obj_t** out_short_bar,
-                                lv_obj_t** out_short_reset,
-                                lv_obj_t** out_weekly_row,
-                                lv_obj_t** out_weekly_pct,
-                                lv_obj_t** out_weekly_bar,
-                                lv_obj_t** out_weekly_reset) {
+static lv_obj_t* make_provider_panel(lv_obj_t* parent, int y,
+                                     const char* provider,
+                                     lv_color_t provider_color,
+                                     lv_obj_t** out_short_row,
+                                     lv_obj_t** out_short_pct,
+                                     lv_obj_t** out_short_bar,
+                                     lv_obj_t** out_short_reset,
+                                     lv_obj_t** out_weekly_row,
+                                     lv_obj_t** out_weekly_pct,
+                                     lv_obj_t** out_weekly_bar,
+                                     lv_obj_t** out_weekly_reset) {
     lv_obj_t* panel = make_panel(parent, L.margin, y,
                                  L.content_w, L.usage_panel_h);
     lv_obj_t* title = lv_label_create(panel);
@@ -527,30 +553,62 @@ static void make_provider_panel(lv_obj_t* parent, int y, const char* provider,
     lv_obj_set_style_text_color(title, provider_color, 0);
     lv_obj_set_pos(title, 0, 0);
 
-    *out_short_row = make_provider_row(panel, 30, "5h", out_short_pct,
+    *out_short_row = make_provider_row(panel, 23, "5H", out_short_pct,
                                        out_short_bar, out_short_reset);
-    *out_weekly_row = make_provider_row(panel, 60, "7d", out_weekly_pct,
+    *out_weekly_row = make_provider_row(panel, 56, "7D", out_weekly_pct,
                                         out_weekly_bar, out_weekly_reset);
+    return panel;
 }
 
-static void layout_provider_rows(lv_obj_t* short_row, lv_obj_t* weekly_row,
+static void layout_provider_cards(bool claude_short, bool claude_weekly,
+                                  bool codex_short, bool codex_weekly) {
+    int claude_rows = (claude_short ? 1 : 0) + (claude_weekly ? 1 : 0);
+    int codex_rows = (codex_short ? 1 : 0) + (codex_weekly ? 1 : 0);
+    if (claude_rows == 0) claude_rows = 1;
+    if (codex_rows == 0) codex_rows = 1;
+
+    int claude_h = 91;
+    int codex_h = 91;
+    if (claude_rows > codex_rows) {
+        claude_h = 112;
+        codex_h = 70;
+    } else if (codex_rows > claude_rows) {
+        claude_h = 70;
+        codex_h = 112;
+    }
+
+    lv_obj_set_pos(panel_claude, L.margin, L.content_y);
+    lv_obj_set_size(panel_claude, L.content_w, claude_h);
+    lv_obj_set_pos(panel_codex, L.margin,
+                   L.content_y + claude_h + L.usage_panel_gap);
+    lv_obj_set_size(panel_codex, L.content_w, codex_h);
+}
+
+static void layout_provider_rows(lv_obj_t* panel,
+                                 lv_obj_t* short_row, lv_obj_t* weekly_row,
                                  bool has_short, bool has_weekly) {
+    const int panel_h = lv_obj_get_height(panel);
     if (has_short && has_weekly) {
         lv_obj_clear_flag(short_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(short_row, 30);
-        lv_obj_set_y(weekly_row, 60);
+        if (panel_h >= 100) {
+            lv_obj_set_y(short_row, 34);
+            lv_obj_set_y(weekly_row, 72);
+        } else {
+            lv_obj_set_y(short_row, 27);
+            lv_obj_set_y(weekly_row, 57);
+        }
     } else if (has_short) {
         lv_obj_clear_flag(short_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(short_row, 43);
+        lv_obj_set_y(short_row, 24 + (panel_h - 50) / 2);
     } else {
         // Weekly-only is the common Codex account shape. Keep exactly one
         // centred row; if neither window is available it also carries the
         // honest "--" unavailable state instead of leaving an empty card.
         lv_obj_add_flag(short_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(weekly_row, 43);
+        lv_obj_set_y(weekly_row, 24 + (panel_h - 50) / 2);
     }
 }
 #endif
@@ -623,20 +681,21 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
 #ifdef BOARD_EPAPER_154G
-    make_provider_panel(usage_group, L.content_y, "Claude", COL_RED,
-                        &row_claude_session,
-                        &lbl_session_pct, &bar_session, &lbl_session_reset,
-                        &row_claude_weekly,
-                        &lbl_weekly_pct, &bar_weekly, &lbl_weekly_reset);
-    make_provider_panel(usage_group,
-                        L.content_y + L.usage_panel_h + L.usage_panel_gap,
-                        "Codex", COL_TEXT,
-                        &row_codex_session,
-                        &lbl_codex_session_pct, &bar_codex_session,
-                        &lbl_codex_session_reset,
-                        &row_codex_weekly,
-                        &lbl_codex_weekly_pct, &bar_codex_weekly,
-                        &lbl_codex_weekly_reset);
+    panel_claude = make_provider_panel(
+        usage_group, L.content_y, "Claude", COL_RED,
+        &row_claude_session,
+        &lbl_session_pct, &bar_session, &lbl_session_reset,
+        &row_claude_weekly,
+        &lbl_weekly_pct, &bar_weekly, &lbl_weekly_reset);
+    panel_codex = make_provider_panel(
+        usage_group, L.content_y + L.usage_panel_h + L.usage_panel_gap,
+        "Codex", COL_TEXT,
+        &row_codex_session,
+        &lbl_codex_session_pct, &bar_codex_session,
+        &lbl_codex_session_reset,
+        &row_codex_weekly,
+        &lbl_codex_weekly_pct, &bar_codex_weekly,
+        &lbl_codex_weekly_reset);
 #else
     make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
@@ -768,10 +827,17 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
     int rem = 100 - (int)(util_pct + 0.5f);
     if (rem < 0) rem = 0; else if (rem > 100) rem = 100;
     lv_label_set_text_fmt(pct_lbl, "%d%%", rem);
-    // With the duplicate bar removed, reserve colour for an actionable low
-    // quota warning; normal values remain high-contrast black.
+    // Text stays high-contrast except for an actionable low-quota warning. The
+    // bar retains the four-colour at-a-glance gradient.
     lv_obj_set_style_text_color(pct_lbl, rem < 25 ? COL_RED : COL_TEXT, 0);
-    if (bar) lv_bar_set_value(bar, rem, LV_ANIM_OFF);
+    if (bar) {
+        lv_bar_set_value(bar, rem, LV_ANIM_OFF);
+        lv_color_t c = (rem >= 75) ? COL_TEXT
+                     : (rem >= 50) ? COL_YELLOW
+                     : (rem >= 25) ? COL_ORANGE_DITHER
+                                   : COL_RED;
+        lv_obj_set_style_bg_color(bar, c, LV_PART_INDICATOR);
+    }
 #else
     int u = (int)(util_pct + 0.5f);
     lv_label_set_text_fmt(pct_lbl, "%d%%", u);
@@ -779,6 +845,24 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
     lv_obj_set_style_bg_color(bar, pct_color(util_pct), LV_PART_INDICATOR);
 #endif
 }
+
+#ifdef BOARD_EPAPER_154G
+static void set_reset_tick(lv_obj_t* tick, int reset_mins, int window_mins) {
+    if (!tick) return;
+    if (reset_mins < 0 || window_mins <= 0) {
+        lv_obj_add_flag(tick, LV_OBJ_FLAG_HIDDEN);
+        return;
+    }
+    lv_obj_clear_flag(tick, LV_OBJ_FLAG_HIDDEN);
+    int x = QUOTA_BAR_X
+          + (reset_mins * (QUOTA_BAR_W - RESET_TICK_W) + window_mins / 2)
+            / window_mins;
+    if (x < QUOTA_BAR_X) x = QUOTA_BAR_X;
+    const int max_x = QUOTA_BAR_X + QUOTA_BAR_W - RESET_TICK_W;
+    if (x > max_x) x = max_x;
+    lv_obj_set_x(tick, x);
+}
+#endif
 
 void ui_update(const UsageData* data) {
     if (!data->valid) return;
@@ -799,37 +883,43 @@ void ui_update(const UsageData* data) {
     char buf[48];
     set_usage_metric(lbl_session_pct, bar_session, data->session_pct);
 #ifdef BOARD_EPAPER_154G
-    format_reset_compact(data->session_reset_mins, buf, sizeof(buf));
+    set_reset_tick(lbl_session_reset, data->session_reset_mins, 300);
 #else
     format_reset_time(data->session_reset_mins, buf, sizeof(buf));
-#endif
     lv_label_set_text(lbl_session_reset, buf);
+#endif
 
     set_usage_metric(lbl_weekly_pct, bar_weekly, data->weekly_pct);
 #ifdef BOARD_EPAPER_154G
-    format_reset_compact(data->weekly_reset_mins, buf, sizeof(buf));
+    set_reset_tick(lbl_weekly_reset, data->weekly_reset_mins, 10080);
 #else
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
-#endif
     lv_label_set_text(lbl_weekly_reset, buf);
+#endif
 
 #ifdef BOARD_EPAPER_154G
-    layout_provider_rows(row_claude_session, row_claude_weekly,
-                         data->session_pct >= 0.0f,
-                         data->weekly_pct >= 0.0f);
-    layout_provider_rows(row_codex_session, row_codex_weekly,
-                         data->codex_session_pct >= 0.0f,
-                         data->codex_weekly_pct >= 0.0f);
+    const bool claude_short = data->session_pct >= 0.0f;
+    const bool claude_weekly = data->weekly_pct >= 0.0f;
+    const bool codex_short = data->codex_session_pct >= 0.0f;
+    const bool codex_weekly = data->codex_weekly_pct >= 0.0f;
+    layout_provider_cards(claude_short, claude_weekly,
+                          codex_short, codex_weekly);
+    layout_provider_rows(panel_claude,
+                         row_claude_session, row_claude_weekly,
+                         claude_short, claude_weekly);
+    layout_provider_rows(panel_codex,
+                         row_codex_session, row_codex_weekly,
+                         codex_short, codex_weekly);
 
     set_usage_metric(lbl_codex_session_pct, bar_codex_session,
                      data->codex_session_pct);
-    format_reset_compact(data->codex_session_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_codex_session_reset, buf);
+    set_reset_tick(lbl_codex_session_reset,
+                   data->codex_session_reset_mins, 300);
 
     set_usage_metric(lbl_codex_weekly_pct, bar_codex_weekly,
                      data->codex_weekly_pct);
-    format_reset_compact(data->codex_weekly_reset_mins, buf, sizeof(buf));
-    lv_label_set_text(lbl_codex_weekly_reset, buf);
+    set_reset_tick(lbl_codex_weekly_reset,
+                   data->codex_weekly_reset_mins, 10080);
 #endif
 }
 
