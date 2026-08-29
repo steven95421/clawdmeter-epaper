@@ -67,6 +67,64 @@ def reset_minutes(reset_ts: str, now: float) -> int:
     return int(round(mins)) if mins > 0 else 0
 
 
+# ---- Codex app-server rate limits -> display payload -----------------------
+
+def _codex_snapshot(rate_limit_response: dict) -> dict | None:
+    """Pick the general Codex quota bucket from an app-server response.
+
+    Newer app-server versions expose multiple model-specific buckets through
+    ``rateLimitsByLimitId``.  The display must not accidentally label a Spark
+    quota as the account's general Codex quota, so prefer the exact ``codex``
+    bucket. Only fall back to the backward-compatible ``rateLimits`` view when
+    the multi-bucket map itself is absent.
+    """
+    if not isinstance(rate_limit_response, dict):
+        return None
+    buckets = rate_limit_response.get("rateLimitsByLimitId")
+    if isinstance(buckets, dict):
+        general = buckets.get("codex")
+        return general if isinstance(general, dict) else None
+    legacy = rate_limit_response.get("rateLimits")
+    return legacy if isinstance(legacy, dict) else None
+
+
+def codex_usage_payload(rate_limit_response: dict, now: float) -> dict:
+    """Convert ``account/rateLimits/read`` into the compact BLE fields.
+
+    ``usedPercent`` is kept as utilisation to match the existing Claude
+    payload; the 154g firmware converts both providers to remaining percent at
+    render time.  Missing windows are represented by ``-1`` rather than zero,
+    because a plan may legitimately expose only a weekly window.
+    """
+    payload = {"cs": -1, "csr": -1, "cw": -1, "cwr": -1}
+    snapshot = _codex_snapshot(rate_limit_response)
+    if snapshot is None:
+        return payload
+
+    for window in (snapshot.get("primary"), snapshot.get("secondary")):
+        if not isinstance(window, dict):
+            continue
+        try:
+            duration = int(window["windowDurationMins"])
+            used = int(round(float(window["usedPercent"])))
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        used = max(0, min(100, used))
+        resets_at = window.get("resetsAt")
+        reset = -1 if resets_at is None else reset_minutes(str(resets_at), now)
+
+        # Codex currently uses a rolling five-hour window (300 minutes) and a
+        # weekly window (10,080 minutes).  Classify by scale so this remains
+        # useful if the service adjusts either duration slightly.
+        if 0 < duration < 1440:
+            payload["cs"], payload["csr"] = used, reset
+        elif duration >= 1440:
+            payload["cw"], payload["cwr"] = used, reset
+
+    return payload
+
+
 # ---- Anchored low-duty scan scheduling -------------------------------------
 # Tunables for the away-scan cadence; see claude_usage_daemon.main() for how
 # they drive the loop.

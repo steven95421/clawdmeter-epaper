@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Claude Usage Tracker Daemon (BLE) — macOS port of claude-usage-daemon.sh.
+"""Claude + Codex Usage Tracker Daemon (BLE) for macOS.
 
-Polls Claude API rate-limit headers and writes a JSON payload to the
-ESP32 "Clawdmeter" peripheral over a custom GATT service. Uses
-bleak (CoreBluetooth backend on macOS).
+Polls Claude API rate-limit headers plus the signed-in Codex account through
+Codex app-server, then writes one compact JSON payload to the ESP32
+"Clawdmeter" peripheral over a custom GATT service. Uses bleak
+(CoreBluetooth backend on macOS).
 """
 
 from __future__ import annotations  # 3.9-compat: lazy annotations (X | None)
@@ -13,6 +14,7 @@ import getpass
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -32,6 +34,7 @@ from usage_logic import (
     IDLE_SHORT_PERIOD,
     MAX_LEARN_GAP,
     MIN_LEARN_GAP,
+    codex_usage_payload,
     decide_scan_mode,
     pct,
     reset_minutes,
@@ -46,6 +49,17 @@ REQ_CHAR_UUID = "4c41555a-4465-7669-6365-000000000004"
 POLL_INTERVAL = 60
 TICK = 5
 SCAN_TIMEOUT = 4.0  # short scans cut BT-radio occupancy; a board advert is seen in <1s
+CODEX_QUERY_TIMEOUT = 15.0
+CODEX_CACHE_TTL = 120.0
+
+# The GUI-launched daemon gets a minimal PATH, so prefer the binaries bundled
+# by the first-party desktop apps before falling back to PATH.  The env override
+# keeps development builds and nonstandard installs possible without editing
+# this file.
+CODEX_BIN_CANDIDATES = (
+    Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
+    Path("/Applications/Codex.app/Contents/Resources/codex"),
+)
 
 # macOS: token lives in the Keychain. We try our OWN item first so the daemon
 # can't be starved by whatever else writes to Claude Code's shared item —
@@ -81,6 +95,7 @@ def log(msg: str) -> None:
 
 
 _keychain_warned: set = set()   # log each dud source once per run, not per poll
+_codex_cache: tuple[float, dict] | None = None
 
 
 def _read_token_keychain() -> str | None:
@@ -336,6 +351,145 @@ async def poll_api(token: str) -> dict | None:
     return payload
 
 
+def find_codex_binary() -> str | None:
+    override = os.environ.get("CLAWDMETER_CODEX_BIN")
+    if override and Path(override).is_file():
+        return override
+    for candidate in CODEX_BIN_CANDIDATES:
+        if candidate.is_file():
+            return str(candidate)
+    return shutil.which("codex")
+
+
+async def _close_subprocess(proc: asyncio.subprocess.Process) -> None:
+    """Close an app-server child without leaving a process behind."""
+    if proc.stdin is not None and not proc.stdin.is_closing():
+        proc.stdin.close()
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=1.0)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        proc.terminate()
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+
+
+async def poll_codex_usage() -> dict | None:
+    """Read signed-in ChatGPT/Codex quota windows via official app-server.
+
+    The process is intentionally short-lived: one initialize handshake, one
+    read-only ``account/rateLimits/read`` request, then EOF.  This reuses the
+    user's existing Codex login and never reads or copies auth files itself.
+    """
+    global _codex_cache
+    now_mono = time.monotonic()
+    if _codex_cache is not None and now_mono - _codex_cache[0] < CODEX_CACHE_TTL:
+        return dict(_codex_cache[1])
+
+    codex_bin = find_codex_binary()
+    if codex_bin is None:
+        log("Codex usage unavailable: codex executable not found")
+        return None
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            codex_bin,
+            "app-server",
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+    except OSError as e:
+        log(f"Codex usage unavailable: app-server start failed ({e})")
+        return None
+
+    try:
+        assert proc.stdin is not None
+        assert proc.stdout is not None
+        messages = (
+            {
+                "method": "initialize",
+                "id": 0,
+                "params": {
+                    "clientInfo": {
+                        "name": "clawdmeter",
+                        "title": "Clawdmeter Usage Display",
+                        "version": "0.1.0",
+                    }
+                },
+            },
+            {"method": "initialized", "params": {}},
+            {"method": "account/rateLimits/read", "id": 1},
+        )
+        wire = "".join(json.dumps(msg, separators=(",", ":")) + "\n"
+                       for msg in messages)
+        proc.stdin.write(wire.encode())
+        await proc.stdin.drain()
+
+        deadline = asyncio.get_running_loop().time() + CODEX_QUERY_TIMEOUT
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            line = await asyncio.wait_for(proc.stdout.readline(), timeout=remaining)
+            if not line:
+                log("Codex usage unavailable: app-server closed before replying")
+                return None
+            try:
+                message = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(message, dict):
+                continue
+            if message.get("id") != 1:
+                continue
+            if not isinstance(message.get("result"), dict):
+                error = message.get("error", {})
+                detail = error.get("message", "unknown response") \
+                    if isinstance(error, dict) else "unknown response"
+                log(f"Codex usage unavailable: {detail}")
+                return None
+
+            payload = codex_usage_payload(message["result"], time.time())
+            _codex_cache = (time.monotonic(), payload)
+            log(f"Codex usage: 5h={payload['cs']}% 7d={payload['cw']}%")
+            return dict(payload)
+    except asyncio.TimeoutError:
+        log(f"Codex usage unavailable: app-server timed out after "
+            f"{CODEX_QUERY_TIMEOUT:.0f}s")
+        return None
+    except (BrokenPipeError, OSError) as e:
+        log(f"Codex usage unavailable: app-server I/O failed ({e})")
+        return None
+    except Exception as e:
+        # Codex is an optional enrichment. A malformed or version-skewed
+        # app-server response must never take down the existing Claude feed.
+        log(f"Codex usage unavailable: unexpected app-server response ({e})")
+        return None
+    finally:
+        await _close_subprocess(proc)
+
+
+async def poll_all_usage(token: str) -> dict | None:
+    """Fetch both providers concurrently; Claude remains the base payload."""
+    claude_result, codex_result = await asyncio.gather(
+        poll_api(token),
+        poll_codex_usage(),
+    )
+    if claude_result is None:
+        return None
+    if codex_result is not None:
+        claude_result.update(codex_result)
+    return claude_result
+
+
 class Session:
     def __init__(self, client: BleakClient) -> None:
         self.client = client
@@ -399,7 +553,7 @@ async def connect_and_run(target, stop_event: asyncio.Event) -> bool:
                 if not token:
                     log("No token; skipping poll")
                 else:
-                    payload = await poll_api(token)
+                    payload = await poll_all_usage(token)
                     if payload is not None:
                         if await session.write_payload(payload):
                             last_poll = time.time()
@@ -433,7 +587,7 @@ async def main() -> None:
         except NotImplementedError:
             signal.signal(sig, _stop)
 
-    log("=== Claude Usage Tracker Daemon (BLE, macOS) ===")
+    log("=== Claude + Codex Usage Tracker Daemon (BLE, macOS) ===")
     log(f"Poll interval: {POLL_INTERVAL}s")
 
     # --- Anchored low-duty scan scheduling ---------------------------------

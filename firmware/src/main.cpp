@@ -194,10 +194,25 @@ static bool parse_json(const char* json, UsageData* out) {
         return false;
     }
 
+    const bool had_valid_data = out->valid;
     out->session_pct = doc["s"] | 0.0f;
     out->session_reset_mins = doc["sr"] | -1;
     out->weekly_pct = doc["w"] | 0.0f;
     out->weekly_reset_mins = doc["wr"] | -1;
+
+    // Codex fields were added after the original Claude-only payload. Missing
+    // keys therefore mean either an older daemon or a transient app-server
+    // failure. Preserve a previous good Codex sample in that case; on the very
+    // first payload use -1 so the UI renders "--" instead of a misleading 0%.
+    if (!doc["cs"].isNull()) out->codex_session_pct = doc["cs"].as<float>();
+    else if (!had_valid_data) out->codex_session_pct = -1.0f;
+    if (!doc["csr"].isNull()) out->codex_session_reset_mins = doc["csr"].as<int>();
+    else if (!had_valid_data) out->codex_session_reset_mins = -1;
+    if (!doc["cw"].isNull()) out->codex_weekly_pct = doc["cw"].as<float>();
+    else if (!had_valid_data) out->codex_weekly_pct = -1.0f;
+    if (!doc["cwr"].isNull()) out->codex_weekly_reset_mins = doc["cwr"].as<int>();
+    else if (!had_valid_data) out->codex_weekly_reset_mins = -1;
+
     strlcpy(out->status, doc["st"] | "unknown", sizeof(out->status));
     out->ok = doc["ok"] | false;
     out->valid = true;

@@ -23,3 +23,20 @@ static inline void format_reset_time(int mins, char* buf, size_t len) {
         snprintf(buf, len, "Resets in %dd %dh", mins / 1440, (mins % 1440) / 60);
     }
 }
+
+// Dense reset label for the dual-provider 200x200 card rows. The long form
+// above remains unchanged for the original Current / Weekly panels.
+static inline void format_reset_compact(int mins, char* buf, size_t len) {
+#ifdef BOARD_EPAPER_154G
+    if (mins > 0) { mins = ((mins + 7) / 15) * 15; if (mins < 15) mins = 15; }
+#endif
+    if (mins < 0) {
+        snprintf(buf, len, "--");
+    } else if (mins < 60) {
+        snprintf(buf, len, "%dm", mins);
+    } else if (mins < 1440) {
+        snprintf(buf, len, "%dh%dm", mins / 60, mins % 60);
+    } else {
+        snprintf(buf, len, "%dd%dh", mins / 1440, (mins % 1440) / 60);
+    }
+}

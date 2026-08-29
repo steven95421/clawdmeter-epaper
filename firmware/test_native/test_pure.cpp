@@ -66,6 +66,11 @@ static void test_reset_time_format() {
     format_reset_time(45, b, sizeof b);    CHECK(strcmp(b, "Resets in 45m") == 0);
     format_reset_time(90, b, sizeof b);    CHECK(strcmp(b, "Resets in 1h 30m") == 0);
     format_reset_time(1500, b, sizeof b);  CHECK(strcmp(b, "Resets in 1d 1h") == 0);
+
+    format_reset_compact(-1, b, sizeof b);    CHECK(strcmp(b, "--") == 0);
+    format_reset_compact(45, b, sizeof b);    CHECK(strcmp(b, "45m") == 0);
+    format_reset_compact(90, b, sizeof b);    CHECK(strcmp(b, "1h30m") == 0);
+    format_reset_compact(10039, b, sizeof b); CHECK(strcmp(b, "6d23h") == 0);
 }
 
 int main() {

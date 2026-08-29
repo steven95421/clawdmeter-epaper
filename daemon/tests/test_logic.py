@@ -15,6 +15,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from usage_logic import (  # noqa: E402
+    codex_usage_payload,
     decide_scan_mode,
     extract_access_token as _extract_access_token,
     pct,
@@ -52,6 +53,98 @@ class TestPayloadMath(unittest.TestCase):
     def test_reset_minutes_bad_input_is_zero(self):
         self.assertEqual(reset_minutes("", 0.0), 0)
         self.assertEqual(reset_minutes("soon", 0.0), 0)
+
+
+class TestCodexPayload(unittest.TestCase):
+    def test_maps_five_hour_and_weekly_windows(self):
+        response = {
+            "rateLimits": {
+                "primary": {
+                    "usedPercent": 25,
+                    "windowDurationMins": 300,
+                    "resetsAt": 3600,
+                },
+                "secondary": {
+                    "usedPercent": 40,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 86400,
+                },
+            }
+        }
+        self.assertEqual(
+            codex_usage_payload(response, now=0),
+            {"cs": 25, "csr": 60, "cw": 40, "cwr": 1440},
+        )
+
+    def test_weekly_only_is_not_mislabeled_as_five_hour(self):
+        response = {
+            "rateLimits": {
+                "primary": {
+                    "usedPercent": 1,
+                    "windowDurationMins": 10080,
+                    "resetsAt": 604800,
+                },
+                "secondary": None,
+            }
+        }
+        self.assertEqual(
+            codex_usage_payload(response, now=0),
+            {"cs": -1, "csr": -1, "cw": 1, "cwr": 10080},
+        )
+
+    def test_prefers_general_codex_bucket_over_model_specific_bucket(self):
+        response = {
+            "rateLimits": {"primary": {"usedPercent": 99,
+                                        "windowDurationMins": 300,
+                                        "resetsAt": 600}},
+            "rateLimitsByLimitId": {
+                "codex": {"primary": {"usedPercent": 7,
+                                       "windowDurationMins": 10080,
+                                       "resetsAt": 1200}},
+                "codex_bengalfox": {"primary": {"usedPercent": 88,
+                                                 "windowDurationMins": 300,
+                                                 "resetsAt": 1800}},
+            },
+        }
+        self.assertEqual(
+            codex_usage_payload(response, now=0),
+            {"cs": -1, "csr": -1, "cw": 7, "cwr": 20},
+        )
+
+    def test_does_not_fall_back_to_model_bucket_in_multi_bucket_response(self):
+        response = {
+            "rateLimits": {
+                "primary": {
+                    "usedPercent": 88,
+                    "windowDurationMins": 300,
+                    "resetsAt": 1800,
+                }
+            },
+            "rateLimitsByLimitId": {
+                "codex_bengalfox": {
+                    "primary": {
+                        "usedPercent": 88,
+                        "windowDurationMins": 300,
+                        "resetsAt": 1800,
+                    }
+                }
+            },
+        }
+        self.assertEqual(
+            codex_usage_payload(response, now=0),
+            {"cs": -1, "csr": -1, "cw": -1, "cwr": -1},
+        )
+
+    def test_missing_or_malformed_response_is_unavailable(self):
+        unavailable = {"cs": -1, "csr": -1, "cw": -1, "cwr": -1}
+        self.assertEqual(codex_usage_payload({}, now=0), unavailable)
+        self.assertEqual(
+            codex_usage_payload(
+                {"rateLimits": {"primary": {"usedPercent": "oops"}}},
+                now=0,
+            ),
+            unavailable,
+        )
 
 
 class TestScanScheduler(unittest.TestCase):

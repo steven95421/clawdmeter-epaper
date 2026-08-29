@@ -121,8 +121,8 @@ static void compute_layout(const BoardCaps& c) {
         //
         // Vertical budget (200 px total):
         //   y=0..30   top row: logo (30 px), title centred, battery (24 px)
-        //   y=34..98  panel 1 (Current) - 64 px
-        //   y=102..166 panel 2 (Weekly) - 64 px
+        //   y=34..98  provider panel 1 (Claude) - 64 px
+        //   y=102..166 provider panel 2 (Codex) - 64 px
         //   y=170..200 footer: rotating animation message
         L.margin = 6;
         // title_y=4 lines up the visible top of the "Usage" /
@@ -137,10 +137,8 @@ static void compute_layout(const BoardCaps& c) {
         L.content_y = 34;
         L.usage_panel_h = 64;
         L.usage_panel_gap = 4;
-        // Within each 64 px panel (1 px pad top+bottom, 62 px usable):
-        //   child y=0..28  pct (styrene_28, line_height 28)
-        //   child y=32..42 bar (10 px, 4 px gap above)
-        //   child y=46..62 reset (styrene_16, line_height 16, 4 px gap)
+        // Legacy single-provider geometry remains defined here; the 1.54G
+        // dual-provider builder uses compact quota rows inside the same cards.
         L.usage_bar_y = 32;
         L.usage_reset_y = 46;
         L.usage_bar_h = 10;
@@ -211,6 +209,18 @@ static lv_obj_t* bar_weekly;
 static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
+#ifdef BOARD_EPAPER_154G
+static lv_obj_t* row_claude_session;
+static lv_obj_t* row_claude_weekly;
+static lv_obj_t* row_codex_session;
+static lv_obj_t* row_codex_weekly;
+static lv_obj_t* bar_codex_session;
+static lv_obj_t* lbl_codex_session_pct;
+static lv_obj_t* lbl_codex_session_reset;
+static lv_obj_t* bar_codex_weekly;
+static lv_obj_t* lbl_codex_weekly_pct;
+static lv_obj_t* lbl_codex_weekly_reset;
+#endif
 static lv_obj_t* lbl_anim;      // status line: connection state + whimsical idle
 
 // ---- Battery indicator (shared, on top) ----
@@ -457,6 +467,95 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
     lv_obj_set_pos(*out_reset, 0, L.usage_reset_y);
 }
 
+#ifdef BOARD_EPAPER_154G
+// One dense provider card for the 200x200 display. A row owns its window label,
+// remaining %, compact bar, and reset countdown so the entire row can be hidden
+// when that quota window is not exposed by the provider.
+static lv_obj_t* make_provider_row(lv_obj_t* panel, int y, const char* window,
+                                   lv_obj_t** out_pct, lv_obj_t** out_bar,
+                                   lv_obj_t** out_reset) {
+    lv_obj_t* row = lv_obj_create(panel);
+    lv_obj_set_pos(row, 0, y);
+    lv_obj_set_size(row, L.content_w - 2 * L.panel_hpad, 18);
+    lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(row, 0, 0);
+    lv_obj_set_style_pad_all(row, 0, 0);
+    lv_obj_clear_flag(row, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(row, LV_OBJ_FLAG_EVENT_BUBBLE);
+
+    lv_obj_t* window_lbl = lv_label_create(row);
+    lv_label_set_text(window_lbl, window);
+    lv_obj_set_style_text_font(window_lbl, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(window_lbl, COL_DIM, 0);
+    lv_obj_set_pos(window_lbl, 0, 1);
+
+    *out_pct = lv_label_create(row);
+    lv_label_set_text(*out_pct, "--");
+    lv_obj_set_style_text_font(*out_pct, &font_styrene_14, 0);
+    lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
+    lv_obj_set_pos(*out_pct, 22, 0);
+
+    // 62 px leaves enough room for a five-character reset label ("6d23h")
+    // at the right edge while still making quota depletion obvious at a glance.
+    *out_bar = make_bar(row, 59, 4, 62, 8);
+
+    *out_reset = lv_label_create(row);
+    lv_label_set_text(*out_reset, "--");
+    lv_obj_set_width(*out_reset, 51);
+    lv_label_set_long_mode(*out_reset, LV_LABEL_LONG_MODE_CLIP);
+    lv_obj_set_style_text_align(*out_reset, LV_TEXT_ALIGN_RIGHT, 0);
+    lv_obj_set_style_text_font(*out_reset, &font_styrene_12, 0);
+    lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
+    lv_obj_set_pos(*out_reset, 125, 1);
+    return row;
+}
+
+static void make_provider_panel(lv_obj_t* parent, int y, const char* provider,
+                                lv_color_t provider_color,
+                                lv_obj_t** out_short_row,
+                                lv_obj_t** out_short_pct,
+                                lv_obj_t** out_short_bar,
+                                lv_obj_t** out_short_reset,
+                                lv_obj_t** out_weekly_row,
+                                lv_obj_t** out_weekly_pct,
+                                lv_obj_t** out_weekly_bar,
+                                lv_obj_t** out_weekly_reset) {
+    lv_obj_t* panel = make_panel(parent, L.margin, y,
+                                 L.content_w, L.usage_panel_h);
+    lv_obj_t* title = lv_label_create(panel);
+    lv_label_set_text(title, provider);
+    lv_obj_set_style_text_font(title, &font_styrene_16, 0);
+    lv_obj_set_style_text_color(title, provider_color, 0);
+    lv_obj_set_pos(title, 0, 0);
+
+    *out_short_row = make_provider_row(panel, 18, "5h", out_short_pct,
+                                       out_short_bar, out_short_reset);
+    *out_weekly_row = make_provider_row(panel, 41, "7d", out_weekly_pct,
+                                        out_weekly_bar, out_weekly_reset);
+}
+
+static void layout_provider_rows(lv_obj_t* short_row, lv_obj_t* weekly_row,
+                                 bool has_short, bool has_weekly) {
+    if (has_short && has_weekly) {
+        lv_obj_clear_flag(short_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_y(short_row, 18);
+        lv_obj_set_y(weekly_row, 41);
+    } else if (has_short) {
+        lv_obj_clear_flag(short_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_y(short_row, 29);
+    } else {
+        // Weekly-only is the common Codex account shape. Keep exactly one
+        // centred row; if neither window is available it also carries the
+        // honest "--" unavailable state instead of leaving an empty card.
+        lv_obj_add_flag(short_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_clear_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_set_y(weekly_row, 29);
+    }
+}
+#endif
+
 // Pairing hint — shown when disconnected so the screen isn't empty and the
 // user knows how to (re)pair. Wording matches the 3-second release gesture.
 static void build_pair_group(lv_obj_t* parent) {
@@ -501,10 +600,14 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
     lbl_title = lv_label_create(usage_container);
+#ifdef BOARD_EPAPER_154G
+    lv_label_set_text(lbl_title, "AI Usage");
+#else
     lv_label_set_text(lbl_title, "Usage");
+#endif
     lv_obj_set_style_text_font(lbl_title, L.usage_title_font, 0);
 #ifdef BOARD_EPAPER_154G
-    // Red "Usage" title — part of the colourful BWRY signature.
+    // Red "AI Usage" title — part of the colourful BWRY signature.
     lv_obj_set_style_text_color(lbl_title, COL_RED, 0);
 #else
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
@@ -527,6 +630,22 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
+#ifdef BOARD_EPAPER_154G
+    make_provider_panel(usage_group, L.content_y, "Claude", COL_RED,
+                        &row_claude_session,
+                        &lbl_session_pct, &bar_session, &lbl_session_reset,
+                        &row_claude_weekly,
+                        &lbl_weekly_pct, &bar_weekly, &lbl_weekly_reset);
+    make_provider_panel(usage_group,
+                        L.content_y + L.usage_panel_h + L.usage_panel_gap,
+                        "Codex", COL_TEXT,
+                        &row_codex_session,
+                        &lbl_codex_session_pct, &bar_codex_session,
+                        &lbl_codex_session_reset,
+                        &row_codex_weekly,
+                        &lbl_codex_weekly_pct, &bar_codex_weekly,
+                        &lbl_codex_weekly_reset);
+#else
     make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
                      &bar_session, &lbl_session_reset);
@@ -534,6 +653,7 @@ static void init_usage_screen(lv_obj_t* scr) {
                      L.content_y + L.usage_panel_h + L.usage_panel_gap, "Weekly",
                      &lbl_weekly_pct, &lbl_weekly_label,
                      &bar_weekly, &lbl_weekly_reset);
+#endif
 
     build_pair_group(usage_container);
 
@@ -643,6 +763,12 @@ void ui_init(void) {
 //   Other boards keep showing UTILISATION % (rises as you use), coloured by
 //   pct_color().
 static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
+    if (util_pct < 0.0f) {
+        lv_label_set_text(pct_lbl, "--");
+        lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+        lv_obj_set_style_bg_color(bar, COL_TEXT, LV_PART_INDICATOR);
+        return;
+    }
 #ifdef BOARD_EPAPER_154G
     int rem = 100 - (int)(util_pct + 0.5f);
     if (rem < 0) rem = 0; else if (rem > 100) rem = 100;
@@ -682,12 +808,39 @@ void ui_update(const UsageData* data) {
 
     char buf[48];
     set_usage_metric(lbl_session_pct, bar_session, data->session_pct);
+#ifdef BOARD_EPAPER_154G
+    format_reset_compact(data->session_reset_mins, buf, sizeof(buf));
+#else
     format_reset_time(data->session_reset_mins, buf, sizeof(buf));
+#endif
     lv_label_set_text(lbl_session_reset, buf);
 
     set_usage_metric(lbl_weekly_pct, bar_weekly, data->weekly_pct);
+#ifdef BOARD_EPAPER_154G
+    format_reset_compact(data->weekly_reset_mins, buf, sizeof(buf));
+#else
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
+#endif
     lv_label_set_text(lbl_weekly_reset, buf);
+
+#ifdef BOARD_EPAPER_154G
+    layout_provider_rows(row_claude_session, row_claude_weekly,
+                         data->session_pct >= 0.0f,
+                         data->weekly_pct >= 0.0f);
+    layout_provider_rows(row_codex_session, row_codex_weekly,
+                         data->codex_session_pct >= 0.0f,
+                         data->codex_weekly_pct >= 0.0f);
+
+    set_usage_metric(lbl_codex_session_pct, bar_codex_session,
+                     data->codex_session_pct);
+    format_reset_compact(data->codex_session_reset_mins, buf, sizeof(buf));
+    lv_label_set_text(lbl_codex_session_reset, buf);
+
+    set_usage_metric(lbl_codex_weekly_pct, bar_codex_weekly,
+                     data->codex_weekly_pct);
+    format_reset_compact(data->codex_weekly_reset_mins, buf, sizeof(buf));
+    lv_label_set_text(lbl_codex_weekly_reset, buf);
+#endif
 }
 
 void ui_tick_anim(void) {

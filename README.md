@@ -1,6 +1,7 @@
 # Clawdmeter
 
-A small ESP32 dashboard I made for my desk to keep an eye on Claude Code usage.
+A small ESP32 dashboard I made for my desk to keep an eye on Claude Code and
+Codex usage.
 
 The board in the photo is a **Waveshare ESP32-S3-ePaper-1.54G** — a 200×200
 four-colour (black / white / red / yellow) e-paper panel. It runs on battery:
@@ -32,7 +33,13 @@ The device boots into the splash. Tap the screen anywhere to switch to the Usage
 
 While the splash is up, the middle (PWR) button cycles animations. **Hold the power button for 3 seconds, then release, to put the device into pairing mode** — this clears the saved Bluetooth bond and re-advertises. The firmware also auto-rotates animations every 20 s within the current usage-rate group, so a long stretch on the splash isn't just one Clawd on loop.
 
-**The e-paper board has no splash and no touch.** A full refresh takes ~15 s, so it can't animate — it boots straight to the Usage view and the PWR button no longer toggles screens. It deep-sleeps between updates and keeps the last reading on the bistable panel the whole time it's asleep.
+**The e-paper board has no splash and no touch.** A full refresh takes ~15 s,
+so it can't animate — it boots straight to the Usage view and the PWR button no
+longer toggles screens. The 1.54G layout shows Claude and Codex together, with
+remaining quota and reset countdowns for each available window. A provider
+that exposes only a weekly quota gets one centred `7d` row instead of a fake
+`5h` value. It deep-sleeps between updates and keeps the last reading on the
+bistable panel the whole time it's asleep.
 
 ## Hardware
 
@@ -54,6 +61,9 @@ Boards supported out of the box:
 - Linux: `curl`, `bluetoothctl`, `busctl` (BlueZ Bluetooth stack)
 - macOS: `python3` (the installer sets up a venv with `bleak` and `httpx`)
 - Claude Code with an active subscription
+- Optional Codex usage: a signed-in ChatGPT/Codex desktop app or `codex`
+  executable. If the account exposes only a weekly window, the 1.54G display
+  uses a single `7d` row.
 
 ## macOS installation
 
@@ -74,7 +84,11 @@ After flashing, open **System Settings → Bluetooth** and click *Connect* next 
 
 ### Install the daemon
 
-The daemon reads your Claude OAuth token from the macOS Keychain (service `Claude Code-credentials`), polls usage every 60 s, and pushes it to the display over BLE.
+The daemon reads your Claude OAuth token from the macOS Keychain (service
+`Claude Code-credentials`), reads the signed-in Codex account's rate limits
+through `codex app-server`, and pushes the combined usage to the display over
+BLE. Codex is optional: Claude updates continue if its executable or rate-limit
+response is unavailable.
 
 ```bash
 ./install-mac.sh
@@ -119,7 +133,8 @@ To re-pair later, hold the power button for 3 seconds then release — the devic
 
 ### Install the daemon
 
-The daemon polls your Claude usage every 60 seconds and sends it to the display over BLE.
+The daemon polls Claude usage every 60 seconds and, when a signed-in `codex`
+executable is available, includes Codex rate limits in the same BLE update.
 
 ```bash
 ./install.sh
@@ -135,10 +150,11 @@ View logs: `journalctl --user -u claude-usage-daemon -f`
 1. The daemon reads your Claude Code OAuth token — from the macOS Keychain (service `Claude Code-credentials`) on macOS, or from `~/.claude/.credentials.json` on Linux.
 2. It makes a minimal API call to `api.anthropic.com/v1/messages` — one token of Haiku, basically free.
 3. The usage numbers come straight out of the response headers (`anthropic-ratelimit-unified-5h-utilization` and friends).
-4. The daemon connects to the ESP32 over BLE and writes a JSON payload to the GATT RX characteristic.
-5. The firmware parses it and updates the LVGL dashboard.
-6. The firmware also tracks the rate of change of session % over a 5-minute window and picks splash animations from the matching mood group.
-7. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
+4. If Codex is available, the daemon asks its app-server for the signed-in account's general Codex rate limits. Model-specific limits are not relabeled as the general quota.
+5. The daemon connects to the ESP32 over BLE and writes one combined JSON payload to the GATT RX characteristic.
+6. The firmware parses it and updates the LVGL dashboard.
+7. The firmware also tracks the rate of change of Claude session % over a 5-minute window and picks splash animations from the matching mood group.
+8. The two side buttons are independent of all of this — they send Space and Shift+Tab as BLE HID keyboard input to the paired host directly.
 
 ## Physical buttons
 
@@ -168,10 +184,25 @@ The device advertises a custom GATT service alongside the standard HID keyboard 
 JSON payload format (written to RX):
 
 ```json
-{ "s": 45, "sr": 120, "w": 28, "wr": 7200, "st": "allowed", "ok": true }
+{
+  "s": 45,
+  "sr": 120,
+  "w": 28,
+  "wr": 7200,
+  "st": "allowed",
+  "ok": true,
+  "cs": 12,
+  "csr": 180,
+  "cw": 34,
+  "cwr": 7200
+}
 ```
 
-Fields: `s` = session %, `sr` = session reset (minutes), `w` = weekly %, `wr` = weekly reset (minutes), `st` = status, `ok` = success flag.
+Claude fields: `s` = session used %, `sr` = session reset (minutes), `w` =
+weekly used %, `wr` = weekly reset (minutes), `st` = status, `ok` = success
+flag. Optional Codex fields use the same units: `cs`, `csr`, `cw`, and `cwr`.
+Unavailable Codex values are `-1`; firmware that receives an older Claude-only
+payload remains compatible.
 
 ## Recompiling fonts
 
