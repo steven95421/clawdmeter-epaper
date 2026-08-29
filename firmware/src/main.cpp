@@ -65,6 +65,10 @@ static bool     nap_is_timer_wake = false;
 static uint32_t nap_boot_ms       = 0;
 static bool     nap_got_data      = false;   // fresh BLE payload arrived THIS wake
 static uint32_t nap_got_data_ms   = 0;
+// An explicit serial screenshot is a development/QA session. Keep the board
+// awake briefly afterward so automated inspection and a corrective re-flash
+// do not have to wait through another 15-minute battery sleep cycle.
+static uint32_t nap_serial_qa_hold_until_ms = 0;
 
 // Called from loop() when a BLE payload is applied. This is the ONLY freshness
 // signal: usage.valid is no longer one, because it is restored true from RTC on
@@ -85,6 +89,7 @@ static uint32_t nap_budget_now = NAP_AWAKE_TIMER_MS;
 static void nap_tick(void) {
     const uint32_t now = millis();
     if (nap_boot_ms == 0) nap_boot_ms = now;   // first loop = wake epoch
+    if ((int32_t)(nap_serial_qa_hold_until_ms - now) > 0) return;
 
     const uint32_t awake  = now - nap_boot_ms;
     uint32_t budget = nap_is_timer_wake ? NAP_AWAKE_TIMER_MS : NAP_AWAKE_INTERACT_MS;
@@ -223,6 +228,12 @@ static bool parse_json(const char* json, UsageData* out) {
 #define CMD_BUF_SIZE 64
 static char cmd_buf[CMD_BUF_SIZE];
 static int cmd_pos = 0;
+#ifdef BOARD_EPAPER_154G
+// A cold/timer wake briefly builds the pairing hint before the BLE payload is
+// applied. Defer screenshot requests during that gap so automated visual QA
+// captures the real usage frame instead of racing the daemon write.
+static bool screenshot_pending_usage = false;
+#endif
 
 static void send_screenshot() {
 #ifndef BOARD_HAS_PSRAM
@@ -231,6 +242,9 @@ static void send_screenshot() {
     Serial.println("SCREENSHOT_UNSUPPORTED");
     return;
 #else
+#ifdef BOARD_EPAPER_154G
+    nap_serial_qa_hold_until_ms = millis() + 120000UL;
+#endif
     const uint32_t w = board_caps().width;
     const uint32_t h = board_caps().height;
     const uint32_t row_bytes = w * 2;
@@ -267,7 +281,23 @@ static void check_serial_cmd() {
         char c = Serial.read();
         if (c == '\n' || c == '\r') {
             cmd_buf[cmd_pos] = '\0';
-            if (strcmp(cmd_buf, "screenshot") == 0) send_screenshot();
+            if (strcmp(cmd_buf, "screenshot") == 0) {
+#ifdef BOARD_EPAPER_154G
+                // A screenshot request is an active QA session. Hold the wake
+                // window from the request itself, including while we wait for
+                // this wake's fresh BLE payload.
+                nap_serial_qa_hold_until_ms = millis() + 120000UL;
+                if (nap_got_data) {
+                    send_screenshot();
+                } else {
+                    if (!screenshot_pending_usage)
+                        Serial.println("SCREENSHOT_WAIT_USAGE");
+                    screenshot_pending_usage = true;
+                }
+#else
+                send_screenshot();
+#endif
+            }
             cmd_pos = 0;
         } else if (cmd_pos < CMD_BUF_SIZE - 1) {
             cmd_buf[cmd_pos++] = c;
@@ -533,6 +563,10 @@ void loop() {
     }
 
 #ifdef BOARD_EPAPER_154G
+    if (screenshot_pending_usage && nap_got_data) {
+        screenshot_pending_usage = false;
+        send_screenshot();
+    }
     nap_tick();   // deep-sleep power-nap: fetch → refresh-if-changed → sleep
 #endif
     delay(5);

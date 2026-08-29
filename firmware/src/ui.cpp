@@ -188,12 +188,9 @@ static void compute_layout(const BoardCaps& c) {
 #define COL_AMBER     THEME_AMBER
 #define COL_RED       THEME_RED
 #define COL_BAR_BG    THEME_BAR_BG
-// 154G 4-colour bar gradient (black -> yellow -> orange -> red). A clean
-// bright yellow (distinct from the terra-cotta accent) and an "orange" that
-// the waveshare_epaper_154g display HAL renders as a YELLOW+RED dither —
-// orange is not a native JD79667 ink. Both are only used in 154g-gated code.
-#define COL_YELLOW        lv_color_hex(0xf5c518)
-#define COL_ORANGE_DITHER lv_color_hex(0xff7f00)
+// Native yellow ink for the 154G quota bars. Avoid simulated orange here:
+// its red/yellow checkerboard looks noisy around a 16 px rounded capsule.
+#define COL_YELLOW lv_color_hex(0xf5c518)
 
 // ---- Usage screen widgets (single non-splash view) ----
 static lv_obj_t* usage_container;
@@ -211,6 +208,8 @@ static lv_obj_t* lbl_weekly_reset;
 #ifdef BOARD_EPAPER_154G
 static constexpr int QUOTA_BAR_X = 31;
 static constexpr int QUOTA_BAR_W = 94;
+static constexpr int QUOTA_BAR_INSET = 2;
+static constexpr int QUOTA_BAR_INNER_W = QUOTA_BAR_W - 2 * QUOTA_BAR_INSET;
 static constexpr int RESET_TICK_W = 5;
 static lv_obj_t* panel_claude;
 static lv_obj_t* panel_codex;
@@ -502,11 +501,41 @@ static lv_obj_t* make_provider_row(lv_obj_t* panel, int y, const char* window,
     lv_obj_set_style_text_align(*out_pct, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_pos(*out_pct, 131, 0);
 
-    *out_bar = make_bar(row, QUOTA_BAR_X, 4, QUOTA_BAR_W, 16);
-    lv_obj_set_style_border_color(*out_bar, COL_TEXT, LV_PART_MAIN);
-    lv_obj_set_style_border_width(*out_bar, 2, LV_PART_MAIN);
-    lv_obj_set_style_radius(*out_bar, 8, LV_PART_MAIN);
-    lv_obj_set_style_radius(*out_bar, 8, LV_PART_INDICATOR);
+    // Build the capsule from nested objects instead of an lv_bar indicator.
+    // The black shell is a real 2 px guard around the coloured fill, so colour
+    // and rounded-corner anti-alias pixels can never paint over the outline.
+    lv_obj_t* bar_shell = lv_obj_create(row);
+    lv_obj_set_pos(bar_shell, QUOTA_BAR_X, 4);
+    lv_obj_set_size(bar_shell, QUOTA_BAR_W, 16);
+    lv_obj_set_style_bg_color(bar_shell, COL_TEXT, 0);
+    lv_obj_set_style_bg_opa(bar_shell, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bar_shell, 0, 0);
+    lv_obj_set_style_radius(bar_shell, 8, 0);
+    lv_obj_set_style_pad_all(bar_shell, QUOTA_BAR_INSET, 0);
+    lv_obj_set_style_clip_corner(bar_shell, true, 0);
+    lv_obj_clear_flag(bar_shell, LV_OBJ_FLAG_SCROLLABLE);
+
+    lv_obj_t* bar_track = lv_obj_create(bar_shell);
+    lv_obj_set_pos(bar_track, 0, 0);
+    lv_obj_set_size(bar_track, QUOTA_BAR_INNER_W, 12);
+    lv_obj_set_style_bg_color(bar_track, COL_BAR_BG, 0);
+    lv_obj_set_style_bg_opa(bar_track, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(bar_track, 0, 0);
+    lv_obj_set_style_radius(bar_track, 6, 0);
+    lv_obj_set_style_pad_all(bar_track, 0, 0);
+    lv_obj_set_style_clip_corner(bar_track, true, 0);
+    lv_obj_clear_flag(bar_track, LV_OBJ_FLAG_SCROLLABLE);
+
+    *out_bar = lv_obj_create(bar_track);
+    lv_obj_set_pos(*out_bar, 0, 0);
+    lv_obj_set_size(*out_bar, 1, 12);
+    lv_obj_set_style_bg_color(*out_bar, COL_TEXT, 0);
+    lv_obj_set_style_bg_opa(*out_bar, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(*out_bar, 0, 0);
+    lv_obj_set_style_radius(*out_bar, 6, 0);
+    lv_obj_set_style_pad_all(*out_bar, 0, 0);
+    lv_obj_clear_flag(*out_bar, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_flag(*out_bar, LV_OBJ_FLAG_HIDDEN);
 
     // On the 154G these legacy "reset label" pointers own graphical ticks.
     // Other board layouts continue to use real reset labels.
@@ -547,6 +576,12 @@ static lv_obj_t* make_provider_panel(lv_obj_t* parent, int y,
                                      lv_obj_t** out_weekly_reset) {
     lv_obj_t* panel = make_panel(parent, L.margin, y,
                                  L.content_w, L.usage_panel_h);
+    // The default LVGL object theme adds a soft bottom shadow. On the BWRY
+    // classifier that grey becomes solid black ink, reading as an unrelated
+    // footer rule. Provider cards on paper are intentionally shadowless.
+    lv_obj_set_style_shadow_width(panel, 0, 0);
+    lv_obj_set_style_shadow_opa(panel, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_outline_width(panel, 0, 0);
     lv_obj_t* title = lv_label_create(panel);
     lv_label_set_text(title, provider);
     lv_obj_set_style_text_font(title, &font_styrene_24, 0);
@@ -567,13 +602,13 @@ static void layout_provider_cards(bool claude_short, bool claude_weekly,
     if (claude_rows == 0) claude_rows = 1;
     if (codex_rows == 0) codex_rows = 1;
 
-    int claude_h = 91;
-    int codex_h = 91;
+    int claude_h = 90;
+    int codex_h = 90;
     if (claude_rows > codex_rows) {
         claude_h = 112;
-        codex_h = 70;
+        codex_h = 68;
     } else if (codex_rows > claude_rows) {
-        claude_h = 70;
+        claude_h = 68;
         codex_h = 112;
     }
 
@@ -582,6 +617,12 @@ static void layout_provider_cards(bool claude_short, bool claude_weekly,
     lv_obj_set_pos(panel_codex, L.margin,
                    L.content_y + claude_h + L.usage_panel_gap);
     lv_obj_set_size(panel_codex, L.content_w, codex_h);
+
+    // LVGL resolves percentage/content sizes lazily. Flush the resize before
+    // layout_provider_rows() reads each panel height; otherwise a 91 -> 68 px
+    // card still reports 91 here and its centred row overflows the bottom.
+    lv_obj_update_layout(panel_claude);
+    lv_obj_update_layout(panel_codex);
 }
 
 static void layout_provider_rows(lv_obj_t* panel,
@@ -621,8 +662,12 @@ static void build_pair_group(lv_obj_t* parent) {
     lv_obj_set_pos(pair_group, 0, L.content_y);
     lv_obj_set_style_bg_opa(pair_group, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(pair_group, 0, 0);
+    lv_obj_set_style_shadow_width(pair_group, 0, 0);
+    lv_obj_set_style_shadow_opa(pair_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_outline_width(pair_group, 0, 0);
     lv_obj_set_style_pad_all(pair_group, 0, 0);
     lv_obj_clear_flag(pair_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(pair_group, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(pair_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
     lv_obj_t* l1 = lv_label_create(pair_group);
@@ -652,8 +697,12 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_pos(usage_container, 0, 0);
     lv_obj_set_style_bg_opa(usage_container, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(usage_container, 0, 0);
+    lv_obj_set_style_shadow_width(usage_container, 0, 0);
+    lv_obj_set_style_shadow_opa(usage_container, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_outline_width(usage_container, 0, 0);
     lv_obj_set_style_pad_all(usage_container, 0, 0);
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(usage_container, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
 #ifndef BOARD_EPAPER_154G
@@ -676,8 +725,12 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_set_pos(usage_group, 0, 0);
     lv_obj_set_style_bg_opa(usage_group, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(usage_group, 0, 0);
+    lv_obj_set_style_shadow_width(usage_group, 0, 0);
+    lv_obj_set_style_shadow_opa(usage_group, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_outline_width(usage_group, 0, 0);
     lv_obj_set_style_pad_all(usage_group, 0, 0);
     lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(usage_group, LV_SCROLLBAR_MODE_OFF);
     lv_obj_add_flag(usage_group, LV_OBJ_FLAG_EVENT_BUBBLE);
 
 #ifdef BOARD_EPAPER_154G
@@ -696,6 +749,7 @@ static void init_usage_screen(lv_obj_t* scr) {
         &row_codex_weekly,
         &lbl_codex_weekly_pct, &bar_codex_weekly,
         &lbl_codex_weekly_reset);
+
 #else
     make_usage_panel(usage_group, L.content_y, "Current",
                      &lbl_session_pct, &lbl_session_label,
@@ -754,6 +808,12 @@ void ui_init(void) {
     lv_obj_t* scr = lv_screen_active();
     lv_obj_set_style_bg_color(scr, COL_BG, 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_pad_all(scr, 0, 0);
+    lv_obj_set_style_border_width(scr, 0, 0);
+    lv_obj_set_style_shadow_width(scr, 0, 0);
+    lv_obj_set_style_outline_width(scr, 0, 0);
+    lv_obj_clear_flag(scr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_scrollbar_mode(scr, LV_SCROLLBAR_MODE_OFF);
 
     init_icon_dsc_rgb565a8(&logo_dsc, LOGO_WIDTH, LOGO_HEIGHT, logo_data);
     init_battery_icons();
@@ -818,8 +878,12 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
         lv_label_set_text(pct_lbl, "--");
         lv_obj_set_style_text_color(pct_lbl, COL_TEXT, 0);
         if (bar) {
+#ifdef BOARD_EPAPER_154G
+            lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+#else
             lv_bar_set_value(bar, 0, LV_ANIM_OFF);
             lv_obj_set_style_bg_color(bar, COL_TEXT, LV_PART_INDICATOR);
+#endif
         }
         return;
     }
@@ -828,15 +892,22 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
     if (rem < 0) rem = 0; else if (rem > 100) rem = 100;
     lv_label_set_text_fmt(pct_lbl, "%d%%", rem);
     // Text stays high-contrast except for an actionable low-quota warning. The
-    // bar retains the four-colour at-a-glance gradient.
+    // bar uses only native black/yellow/red ink for crisp capsule edges.
     lv_obj_set_style_text_color(pct_lbl, rem < 25 ? COL_RED : COL_TEXT, 0);
     if (bar) {
-        lv_bar_set_value(bar, rem, LV_ANIM_OFF);
-        lv_color_t c = (rem >= 75) ? COL_TEXT
-                     : (rem >= 50) ? COL_YELLOW
-                     : (rem >= 25) ? COL_ORANGE_DITHER
+        if (rem == 0) {
+            lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
+        } else {
+            lv_obj_clear_flag(bar, LV_OBJ_FLAG_HIDDEN);
+            int fill_w = (rem * QUOTA_BAR_INNER_W + 99) / 100;
+            if (fill_w < 1) fill_w = 1;
+            if (fill_w > QUOTA_BAR_INNER_W) fill_w = QUOTA_BAR_INNER_W;
+            lv_obj_set_width(bar, fill_w);
+        }
+        lv_color_t c = (rem >= 50) ? COL_TEXT
+                     : (rem >= 25) ? COL_YELLOW
                                    : COL_RED;
-        lv_obj_set_style_bg_color(bar, c, LV_PART_INDICATOR);
+        lv_obj_set_style_bg_color(bar, c, 0);
     }
 #else
     int u = (int)(util_pct + 0.5f);
@@ -854,11 +925,13 @@ static void set_reset_tick(lv_obj_t* tick, int reset_mins, int window_mins) {
         return;
     }
     lv_obj_clear_flag(tick, LV_OBJ_FLAG_HIDDEN);
-    int x = QUOTA_BAR_X
-          + (reset_mins * (QUOTA_BAR_W - RESET_TICK_W) + window_mins / 2)
+    int x = QUOTA_BAR_X + QUOTA_BAR_INSET
+          + (reset_mins * (QUOTA_BAR_INNER_W - RESET_TICK_W)
+             + window_mins / 2)
             / window_mins;
-    if (x < QUOTA_BAR_X) x = QUOTA_BAR_X;
-    const int max_x = QUOTA_BAR_X + QUOTA_BAR_W - RESET_TICK_W;
+    const int min_x = QUOTA_BAR_X + QUOTA_BAR_INSET;
+    if (x < min_x) x = min_x;
+    const int max_x = min_x + QUOTA_BAR_INNER_W - RESET_TICK_W;
     if (x > max_x) x = max_x;
     lv_obj_set_x(tick, x);
 }
