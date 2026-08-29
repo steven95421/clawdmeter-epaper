@@ -112,19 +112,17 @@ static void compute_layout(const BoardCaps& c) {
         L.bt_credit_1_font = &font_styrene_16;
         L.bt_credit_2_font = &font_styrene_14;
     } else {
-        // Tiny layout — tuned for 200x200 e-paper (Waveshare 1.54 V2).
-        // Keeps every element from the AMOLED layout (logo, battery,
-        // both usage panels, rotating animation message) but with
-        // shrunk fonts, scaled icons, and tighter spacing so the whole
-        // thing fits on a 200px-tall panel. ui_init applies
-        // lv_image_set_scale to the logo (~37 %) and battery (~50 %).
-        //
-        // Vertical budget (200 px total):
-        //   y=0..30   top row: logo (30 px), title centred, battery (24 px)
-        //   y=34..98  provider panel 1 (Claude) - 64 px
-        //   y=102..166 provider panel 2 (Codex) - 64 px
-        //   y=170..200 footer: rotating animation message
+        // Tiny layout — tuned for 200x200 e-paper.
         L.margin = 6;
+#ifdef BOARD_EPAPER_154G
+        // The four-colour usage-only board spends every pixel on data: no
+        // redundant page title, logo, or tracking footer. Two 91 px provider
+        // cards plus a 6 px gap fill y=6..194.
+        L.title_y = 0;
+        L.content_y = 6;
+        L.usage_panel_h = 91;
+        L.usage_panel_gap = 6;
+#else
         // title_y=4 lines up the visible top of the "Usage" /
         // "Bluetooth" header glyphs with the visible-content top of
         // the Claude logo and battery icons (both 0-based on this
@@ -137,6 +135,7 @@ static void compute_layout(const BoardCaps& c) {
         L.content_y = 34;
         L.usage_panel_h = 64;
         L.usage_panel_gap = 4;
+#endif
         // Legacy single-provider geometry remains defined here; the 1.54G
         // dual-provider builder uses compact quota rows inside the same cards.
         L.usage_bar_y = 32;
@@ -468,15 +467,15 @@ static void make_usage_panel(lv_obj_t* parent, int y, const char* pill_text,
 }
 
 #ifdef BOARD_EPAPER_154G
-// One dense provider card for the 200x200 display. A row owns its window label,
-// remaining %, compact bar, and reset countdown so the entire row can be hidden
-// when that quota window is not exposed by the provider.
+// One provider card for the 200x200 display. A row owns its window label,
+// remaining %, and reset countdown so the entire row can be hidden when that
+// quota window is not exposed by the provider.
 static lv_obj_t* make_provider_row(lv_obj_t* panel, int y, const char* window,
                                    lv_obj_t** out_pct, lv_obj_t** out_bar,
                                    lv_obj_t** out_reset) {
     lv_obj_t* row = lv_obj_create(panel);
     lv_obj_set_pos(row, 0, y);
-    lv_obj_set_size(row, L.content_w - 2 * L.panel_hpad, 18);
+    lv_obj_set_size(row, L.content_w - 2 * L.panel_hpad, 28);
     lv_obj_set_style_bg_opa(row, LV_OPA_TRANSP, 0);
     lv_obj_set_style_border_width(row, 0, 0);
     lv_obj_set_style_pad_all(row, 0, 0);
@@ -485,28 +484,28 @@ static lv_obj_t* make_provider_row(lv_obj_t* panel, int y, const char* window,
 
     lv_obj_t* window_lbl = lv_label_create(row);
     lv_label_set_text(window_lbl, window);
-    lv_obj_set_style_text_font(window_lbl, &font_styrene_12, 0);
+    lv_obj_set_style_text_font(window_lbl, &font_styrene_20, 0);
     lv_obj_set_style_text_color(window_lbl, COL_DIM, 0);
-    lv_obj_set_pos(window_lbl, 0, 1);
+    lv_obj_set_pos(window_lbl, 0, 4);
 
     *out_pct = lv_label_create(row);
     lv_label_set_text(*out_pct, "--");
-    lv_obj_set_style_text_font(*out_pct, &font_styrene_14, 0);
+    lv_obj_set_style_text_font(*out_pct, &font_styrene_28, 0);
     lv_obj_set_style_text_color(*out_pct, COL_TEXT, 0);
-    lv_obj_set_pos(*out_pct, 22, 0);
+    lv_obj_set_pos(*out_pct, 34, 0);
 
-    // 62 px leaves enough room for a five-character reset label ("6d23h")
-    // at the right edge while still making quota depletion obvious at a glance.
-    *out_bar = make_bar(row, 59, 4, 62, 8);
+    // The percentage already communicates the same quantity as a progress
+    // bar. Omit the duplicate visual and spend that width on legible numbers.
+    *out_bar = NULL;
 
     *out_reset = lv_label_create(row);
     lv_label_set_text(*out_reset, "--");
-    lv_obj_set_width(*out_reset, 51);
+    lv_obj_set_width(*out_reset, 75);
     lv_label_set_long_mode(*out_reset, LV_LABEL_LONG_MODE_CLIP);
     lv_obj_set_style_text_align(*out_reset, LV_TEXT_ALIGN_RIGHT, 0);
-    lv_obj_set_style_text_font(*out_reset, &font_styrene_12, 0);
+    lv_obj_set_style_text_font(*out_reset, &font_styrene_20, 0);
     lv_obj_set_style_text_color(*out_reset, COL_DIM, 0);
-    lv_obj_set_pos(*out_reset, 125, 1);
+    lv_obj_set_pos(*out_reset, 101, 4);
     return row;
 }
 
@@ -524,13 +523,13 @@ static void make_provider_panel(lv_obj_t* parent, int y, const char* provider,
                                  L.content_w, L.usage_panel_h);
     lv_obj_t* title = lv_label_create(panel);
     lv_label_set_text(title, provider);
-    lv_obj_set_style_text_font(title, &font_styrene_16, 0);
+    lv_obj_set_style_text_font(title, &font_styrene_24, 0);
     lv_obj_set_style_text_color(title, provider_color, 0);
     lv_obj_set_pos(title, 0, 0);
 
-    *out_short_row = make_provider_row(panel, 18, "5h", out_short_pct,
+    *out_short_row = make_provider_row(panel, 30, "5h", out_short_pct,
                                        out_short_bar, out_short_reset);
-    *out_weekly_row = make_provider_row(panel, 41, "7d", out_weekly_pct,
+    *out_weekly_row = make_provider_row(panel, 60, "7d", out_weekly_pct,
                                         out_weekly_bar, out_weekly_reset);
 }
 
@@ -539,19 +538,19 @@ static void layout_provider_rows(lv_obj_t* short_row, lv_obj_t* weekly_row,
     if (has_short && has_weekly) {
         lv_obj_clear_flag(short_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(short_row, 18);
-        lv_obj_set_y(weekly_row, 41);
+        lv_obj_set_y(short_row, 30);
+        lv_obj_set_y(weekly_row, 60);
     } else if (has_short) {
         lv_obj_clear_flag(short_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_add_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(short_row, 29);
+        lv_obj_set_y(short_row, 43);
     } else {
         // Weekly-only is the common Codex account shape. Keep exactly one
         // centred row; if neither window is available it also carries the
         // honest "--" unavailable state instead of leaving an empty card.
         lv_obj_add_flag(short_row, LV_OBJ_FLAG_HIDDEN);
         lv_obj_clear_flag(weekly_row, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_set_y(weekly_row, 29);
+        lv_obj_set_y(weekly_row, 43);
     }
 }
 #endif
@@ -599,25 +598,18 @@ static void init_usage_screen(lv_obj_t* scr) {
     lv_obj_clear_flag(usage_container, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_event_cb(usage_container, global_click_cb, LV_EVENT_CLICKED, NULL);
 
+#ifndef BOARD_EPAPER_154G
     lbl_title = lv_label_create(usage_container);
-#ifdef BOARD_EPAPER_154G
-    lv_label_set_text(lbl_title, "AI Usage");
-#else
     lv_label_set_text(lbl_title, "Usage");
-#endif
     lv_obj_set_style_text_font(lbl_title, L.usage_title_font, 0);
-#ifdef BOARD_EPAPER_154G
-    // Red "AI Usage" title — part of the colourful BWRY signature.
-    lv_obj_set_style_text_color(lbl_title, COL_RED, 0);
-#else
     lv_obj_set_style_text_color(lbl_title, COL_TEXT, 0);
-#endif
     // On AMOLED the title is shifted +16 to clear the 80×80 top-left
     // logo overlay. On the tiny tier the logo is scaled to ~30 px and
     // doesn't reach the title, so center cleanly.
     const bool tiny_title = (L.scr_h < 250);
     lv_obj_align(lbl_title, LV_ALIGN_TOP_MID,
                  tiny_title ? 0 : 16, L.title_y);
+#endif
 
     // Usage panels (shown when connected) live in a transparent full-size group
     // so they can be toggled against the pairing hint as one unit.
@@ -657,7 +649,9 @@ static void init_usage_screen(lv_obj_t* scr) {
 
     build_pair_group(usage_container);
 
-    // Status line — always visible on the usage view. Driven by ui_tick_anim().
+#ifndef BOARD_EPAPER_154G
+    // Status line — visible on animated displays. The 154G removes this
+    // redundant footer and uses the full 200x200 canvas for quota data.
     lbl_anim = lv_label_create(usage_container);
     lv_label_set_text(lbl_anim, "");
     lv_obj_set_style_text_font(lbl_anim, L.usage_anim_font, 0);
@@ -690,6 +684,7 @@ static void init_usage_screen(lv_obj_t* scr) {
     } else {
         lv_obj_align(lbl_anim, LV_ALIGN_BOTTOM_MID, 0, -15);
     }
+#endif
 }
 
 // ======== Public API ========
@@ -711,12 +706,8 @@ void ui_init(void) {
         lv_obj_add_event_cb(splash_get_root(), global_click_cb, LV_EVENT_CLICKED, NULL);
     }
 
-    // Logo + battery icons. On the tiny tier the source images (80x80
-    // logo, 48x48 battery) overwhelm a 200 px panel, so apply LVGL's
-    // built-in scaling (256 = 1.0x) to shrink them to ~30 / ~24 px and
-    // tuck the logo and battery into the top corners flanking the
-    // "Usage" title. Native size on AMOLED tiers.
-    //
+    // Scale the logo and battery for the tiny tier. The 154G omits the
+    // decorative logo and places the useful battery state in the first card.
     // lv_image's scale operates around the image pivot (default
     // center); without overriding the pivot, a scaled 80x80 image
     // renders centered inside its 80x80 bbox with empty padding, so
@@ -725,63 +716,62 @@ void ui_init(void) {
     // top-left so set_pos coordinates match the visible top-left
     // corner. (At 1.0x scale this is identity; safe to apply on AMOLED.)
     const bool tiny = (L.scr_h < 250);
+#ifndef BOARD_EPAPER_154G
     const uint32_t logo_scale    = tiny ? 96  : 256;   // 80 -> 30
+#endif
     const uint32_t battery_scale = tiny ? 128 : 256;   // 48 -> 24
     const int battery_w = (ICON_BATTERY_W * (int)battery_scale) / 256;
 
+#ifndef BOARD_EPAPER_154G
     logo_img = lv_image_create(scr);
     lv_image_set_src(logo_img, &logo_dsc);
     lv_image_set_pivot(logo_img, 0, 0);
     lv_image_set_scale(logo_img, logo_scale);
     lv_obj_set_pos(logo_img, L.margin, tiny ? 0 : (L.title_y - 10));
+#endif
 
     battery_img = lv_image_create(scr);
     lv_image_set_src(battery_img, &battery_dscs[0]);
     lv_image_set_pivot(battery_img, 0, 0);
     lv_image_set_scale(battery_img, battery_scale);
     lv_obj_set_pos(battery_img, L.scr_w - battery_w - L.margin,
+#ifdef BOARD_EPAPER_154G
+                   L.margin);
+#else
                    tiny ? 0 : L.title_y);
+#endif
 
 #ifdef BOARD_EPAPER_154G
-    // The logo (terra-cotta crab) and battery glyph are warm-coloured bitmaps
-    // that the BWRY classifier would map to muddy YELLOW. For a clean
-    // black-on-white dashboard (colour reserved for warnings), recolour both to
-    // COL_TEXT — the classifier renders that as BLACK ink. The recolor style
-    // persists across lv_image_set_src, so battery state changes stay black.
-    lv_obj_set_style_image_recolor(logo_img, COL_RED, 0);
-    lv_obj_set_style_image_recolor_opa(logo_img, LV_OPA_COVER, 0);
+    // Battery remains useful information and sits inside the Claude card's
+    // header. The decorative logo is not created on this board.
     lv_obj_set_style_image_recolor(battery_img, COL_TEXT, 0);
     lv_obj_set_style_image_recolor_opa(battery_img, LV_OPA_COVER, 0);
 #endif
 }
 
 // Render one usage metric (percentage label + bar + colour).
-//   154g e-paper: show REMAINING budget (100 - utilization), like the
-//   standalone firmware — the number + bar DEPLETE as you use Claude, and the
-//   colour escalates as little is left (low remaining = warning):
-//     remaining > 50 -> GREEN (plenty) ; 20..50 -> AMBER ; <= 20 -> RED.
+//   154g e-paper: show REMAINING budget (100 - utilization); the number
+//   depletes as quota is used and turns red only below 25%.
 //   Other boards keep showing UTILISATION % (rises as you use), coloured by
 //   pct_color().
 static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
     if (util_pct < 0.0f) {
         lv_label_set_text(pct_lbl, "--");
-        lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-        lv_obj_set_style_bg_color(bar, COL_TEXT, LV_PART_INDICATOR);
+        lv_obj_set_style_text_color(pct_lbl, COL_TEXT, 0);
+        if (bar) {
+            lv_bar_set_value(bar, 0, LV_ANIM_OFF);
+            lv_obj_set_style_bg_color(bar, COL_TEXT, LV_PART_INDICATOR);
+        }
         return;
     }
 #ifdef BOARD_EPAPER_154G
     int rem = 100 - (int)(util_pct + 0.5f);
     if (rem < 0) rem = 0; else if (rem > 100) rem = 100;
     lv_label_set_text_fmt(pct_lbl, "%d%%", rem);
-    lv_bar_set_value(bar, rem, LV_ANIM_OFF);
-    // 4-step heat gradient on remaining budget: BLACK (plenty) -> YELLOW ->
-    // ORANGE -> RED (almost out). ORANGE is a YELLOW+RED dither on this
-    // 4-colour panel (resolved in the display HAL); the others are native ink.
-    lv_color_t c = (rem >= 75) ? COL_TEXT
-                 : (rem >= 50) ? COL_YELLOW
-                 : (rem >= 25) ? COL_ORANGE_DITHER
-                               : COL_RED;
-    lv_obj_set_style_bg_color(bar, c, LV_PART_INDICATOR);
+    // With the duplicate bar removed, reserve colour for an actionable low
+    // quota warning; normal values remain high-contrast black.
+    lv_obj_set_style_text_color(pct_lbl, rem < 25 ? COL_RED : COL_TEXT, 0);
+    if (bar) lv_bar_set_value(bar, rem, LV_ANIM_OFF);
 #else
     int u = (int)(util_pct + 0.5f);
     lv_label_set_text_fmt(pct_lbl, "%d%%", u);
@@ -847,26 +837,9 @@ void ui_tick_anim(void) {
     if (current_screen != SCREEN_USAGE) return;
 
 #ifdef BOARD_EPAPER_154G
-    // 4-colour full-refresh e-paper (~15 s/refresh): do NOT animate — a
-    // rotating spinner/word would thrash the panel. Show a STATIC state word,
-    // RED when disconnected so "no data" reads as a warning. Only touch the
-    // label when the state actually changes, so a steady state produces no
-    // dirty pixels and the display HAL stays idle.
-    {
-        const int st = !s_ble_connected ? (ble_has_bonds() ? 1 /*disconnected*/
-                                                            : 2 /*pairing*/)
-                                         : 0 /*tracking*/;
-        static int last_st = -1;
-        if (st != last_st) {
-            last_st = st;
-            // Clean scheme: colour reserved for warnings. Tracking/Pairing are
-            // BLACK; only Disconnected (a warning) is RED.
-            lv_obj_set_style_text_color(lbl_anim, st == 1 ? COL_RED : COL_TEXT, 0);
-            lv_label_set_text(lbl_anim, st == 1 ? "Disconnected"
-                                      : st == 2 ? "Pairing" : "Tracking");
-        }
-        return;
-    }
+    // Full-refresh e-paper has no animated or static status footer. BLE state
+    // still controls pair-vs-usage visibility; it just consumes no data space.
+    return;
 #endif
 
     uint32_t now = lv_tick_get();
@@ -929,11 +902,15 @@ void ui_show_screen(screen_t screen) {
     }
 
     if (logo_img) {
+#ifdef BOARD_EPAPER_154G
+        lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+#else
         // Hide the logo on the splash screen (full-bleed); show it elsewhere.
         if (screen == SCREEN_SPLASH)
             lv_obj_add_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
         else
             lv_obj_clear_flag(logo_img, LV_OBJ_FLAG_HIDDEN);
+#endif
     }
 
     if (screen != SCREEN_SPLASH) prev_non_splash_screen = screen;
@@ -956,9 +933,7 @@ void ui_update_ble_status(ble_state_t state, const char* name, const char* mac) 
     s_ble_connected = (state == BLE_STATE_CONNECTED);
 
     // Connected, or any real data already shown this boot → usage panels;
-    // otherwise (never had data: fresh pair / cold boot) → pairing hint. The
-    // bottom status line carries the live state word (Connected / Disconnected
-    // / Pairing), so a disconnect is still visible without hiding the numbers.
+    // otherwise (never had data: fresh pair / cold boot) → pairing hint.
     if (usage_group && pair_group) {
         if (s_ble_connected || s_has_usage_data) {
             lv_obj_clear_flag(usage_group, LV_OBJ_FLAG_HIDDEN);
