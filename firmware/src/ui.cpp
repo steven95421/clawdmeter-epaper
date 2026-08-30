@@ -206,11 +206,9 @@ static lv_obj_t* lbl_weekly_pct;
 static lv_obj_t* lbl_weekly_label;
 static lv_obj_t* lbl_weekly_reset;
 #ifdef BOARD_EPAPER_154G
-static constexpr int QUOTA_BAR_X = 31;
-static constexpr int QUOTA_BAR_W = 94;
-static constexpr int QUOTA_BAR_INSET = 2;
-static constexpr int QUOTA_BAR_INNER_W = QUOTA_BAR_W - 2 * QUOTA_BAR_INSET;
-static constexpr int RESET_TICK_W = 5;
+static constexpr int QUOTA_BAR_X = 30;
+static constexpr int QUOTA_BAR_W = 146;
+static constexpr int RESET_TICK_W = 2;
 static lv_obj_t* panel_claude;
 static lv_obj_t* panel_codex;
 static lv_obj_t* row_claude_session;
@@ -500,66 +498,44 @@ static lv_obj_t* make_provider_row(lv_obj_t* panel, int y, const char* window,
     lv_obj_set_width(*out_pct, 45);
     lv_obj_set_style_text_align(*out_pct, LV_TEXT_ALIGN_RIGHT, 0);
     lv_obj_set_pos(*out_pct, 131, 0);
+    // The bar is the value on this face. Hiding a duplicate number frees the
+    // full row width for a calmer, more legible progress rail.
+    lv_obj_add_flag(*out_pct, LV_OBJ_FLAG_HIDDEN);
 
-    // Build the capsule from nested objects instead of an lv_bar indicator.
-    // The black shell is a real 2 px guard around the coloured fill, so colour
-    // and rounded-corner anti-alias pixels can never paint over the outline.
-    lv_obj_t* bar_shell = lv_obj_create(row);
-    lv_obj_set_pos(bar_shell, QUOTA_BAR_X, 4);
-    lv_obj_set_size(bar_shell, QUOTA_BAR_W, 16);
-    lv_obj_set_style_bg_color(bar_shell, COL_TEXT, 0);
-    lv_obj_set_style_bg_opa(bar_shell, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(bar_shell, 0, 0);
-    lv_obj_set_style_radius(bar_shell, 8, 0);
-    lv_obj_set_style_pad_all(bar_shell, QUOTA_BAR_INSET, 0);
-    lv_obj_set_style_clip_corner(bar_shell, true, 0);
-    lv_obj_clear_flag(bar_shell, LV_OBJ_FLAG_SCROLLABLE);
-
-    lv_obj_t* bar_track = lv_obj_create(bar_shell);
-    lv_obj_set_pos(bar_track, 0, 0);
-    lv_obj_set_size(bar_track, QUOTA_BAR_INNER_W, 12);
-    lv_obj_set_style_bg_color(bar_track, COL_BAR_BG, 0);
+    // Flat slider language: a quiet 2 px total-range rail with an 8 px yellow
+    // quota segment over it. No card chrome, outline, shadow, or nested shell.
+    lv_obj_t* bar_track = lv_obj_create(row);
+    lv_obj_set_pos(bar_track, QUOTA_BAR_X, 11);
+    lv_obj_set_size(bar_track, QUOTA_BAR_W, 2);
+    lv_obj_set_style_bg_color(bar_track, COL_TEXT, 0);
     lv_obj_set_style_bg_opa(bar_track, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(bar_track, 0, 0);
-    lv_obj_set_style_radius(bar_track, 6, 0);
+    lv_obj_set_style_radius(bar_track, 1, 0);
     lv_obj_set_style_pad_all(bar_track, 0, 0);
-    lv_obj_set_style_clip_corner(bar_track, true, 0);
     lv_obj_clear_flag(bar_track, LV_OBJ_FLAG_SCROLLABLE);
 
-    *out_bar = lv_obj_create(bar_track);
-    lv_obj_set_pos(*out_bar, 0, 0);
-    lv_obj_set_size(*out_bar, 1, 12);
-    lv_obj_set_style_bg_color(*out_bar, COL_TEXT, 0);
+    *out_bar = lv_obj_create(row);
+    lv_obj_set_pos(*out_bar, QUOTA_BAR_X, 8);
+    lv_obj_set_size(*out_bar, 1, 8);
+    lv_obj_set_style_bg_color(*out_bar, COL_YELLOW, 0);
     lv_obj_set_style_bg_opa(*out_bar, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(*out_bar, 0, 0);
-    lv_obj_set_style_radius(*out_bar, 6, 0);
+    lv_obj_set_style_radius(*out_bar, 4, 0);
     lv_obj_set_style_pad_all(*out_bar, 0, 0);
     lv_obj_clear_flag(*out_bar, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_add_flag(*out_bar, LV_OBJ_FLAG_HIDDEN);
 
-    // On the 154G these legacy "reset label" pointers own graphical ticks.
-    // Other board layouts continue to use real reset labels.
+    // The 2 px red hairline is the second and only other data channel: its
+    // horizontal position is time remaining until reset.
     *out_reset = lv_obj_create(row);
-    lv_obj_set_size(*out_reset, RESET_TICK_W, 24);
-    lv_obj_set_pos(*out_reset, QUOTA_BAR_X, 0);
-    lv_obj_set_style_bg_color(*out_reset, COL_TEXT, 0);
+    lv_obj_set_size(*out_reset, RESET_TICK_W, 14);
+    lv_obj_set_pos(*out_reset, QUOTA_BAR_X, 5);
+    lv_obj_set_style_bg_color(*out_reset, COL_RED, 0);
     lv_obj_set_style_bg_opa(*out_reset, LV_OPA_COVER, 0);
     lv_obj_set_style_border_width(*out_reset, 0, 0);
-    lv_obj_set_style_radius(*out_reset, 0, 0);
+    lv_obj_set_style_radius(*out_reset, 1, 0);
     lv_obj_set_style_pad_all(*out_reset, 0, 0);
     lv_obj_clear_flag(*out_reset, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Dual-tone cursor: red core stays visible on black/yellow fills; black
-    // rails remain visible when a critically low quota makes the bar red.
-    lv_obj_t* tick_core = lv_obj_create(*out_reset);
-    lv_obj_set_size(tick_core, 3, 24);
-    lv_obj_set_pos(tick_core, 1, 0);
-    lv_obj_set_style_bg_color(tick_core, COL_RED, 0);
-    lv_obj_set_style_bg_opa(tick_core, LV_OPA_COVER, 0);
-    lv_obj_set_style_border_width(tick_core, 0, 0);
-    lv_obj_set_style_radius(tick_core, 0, 0);
-    lv_obj_set_style_pad_all(tick_core, 0, 0);
-    lv_obj_clear_flag(tick_core, LV_OBJ_FLAG_SCROLLABLE);
     return row;
 }
 
@@ -584,13 +560,13 @@ static lv_obj_t* make_provider_panel(lv_obj_t* parent, int y,
     lv_obj_set_style_outline_width(panel, 0, 0);
     lv_obj_t* title = lv_label_create(panel);
     lv_label_set_text(title, provider);
-    lv_obj_set_style_text_font(title, &font_styrene_24, 0);
+    lv_obj_set_style_text_font(title, &font_styrene_20, 0);
     lv_obj_set_style_text_color(title, provider_color, 0);
     lv_obj_set_pos(title, 0, 0);
 
-    *out_short_row = make_provider_row(panel, 23, "5H", out_short_pct,
+    *out_short_row = make_provider_row(panel, 23, "5h", out_short_pct,
                                        out_short_bar, out_short_reset);
-    *out_weekly_row = make_provider_row(panel, 56, "7D", out_weekly_pct,
+    *out_weekly_row = make_provider_row(panel, 56, "7d", out_weekly_pct,
                                         out_weekly_bar, out_weekly_reset);
     return panel;
 }
@@ -735,7 +711,7 @@ static void init_usage_screen(lv_obj_t* scr) {
 
 #ifdef BOARD_EPAPER_154G
     panel_claude = make_provider_panel(
-        usage_group, L.content_y, "Claude", COL_RED,
+        usage_group, L.content_y, "Claude", COL_TEXT,
         &row_claude_session,
         &lbl_session_pct, &bar_session, &lbl_session_reset,
         &row_claude_weekly,
@@ -890,24 +866,24 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
 #ifdef BOARD_EPAPER_154G
     int rem = 100 - (int)(util_pct + 0.5f);
     if (rem < 0) rem = 0; else if (rem > 100) rem = 100;
-    lv_label_set_text_fmt(pct_lbl, "%d%%", rem);
+    // Retain the value in the hidden label so the data binding stays shared
+    // with other boards; the 154G face communicates it solely through the bar.
+    lv_label_set_text_fmt(pct_lbl, "%d", rem);
     // Text stays high-contrast except for an actionable low-quota warning. The
-    // bar uses only native black/yellow/red ink for crisp capsule edges.
+    // yellow core is quota, red hairline is reset time, and red text is the
+    // only low-budget warning. Keeping those roles stable reduces visual noise.
     lv_obj_set_style_text_color(pct_lbl, rem < 25 ? COL_RED : COL_TEXT, 0);
     if (bar) {
         if (rem == 0) {
             lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
         } else {
             lv_obj_clear_flag(bar, LV_OBJ_FLAG_HIDDEN);
-            int fill_w = (rem * QUOTA_BAR_INNER_W + 99) / 100;
+            int fill_w = (rem * QUOTA_BAR_W + 99) / 100;
             if (fill_w < 1) fill_w = 1;
-            if (fill_w > QUOTA_BAR_INNER_W) fill_w = QUOTA_BAR_INNER_W;
+            if (fill_w > QUOTA_BAR_W) fill_w = QUOTA_BAR_W;
             lv_obj_set_width(bar, fill_w);
         }
-        lv_color_t c = (rem >= 50) ? COL_TEXT
-                     : (rem >= 25) ? COL_YELLOW
-                                   : COL_RED;
-        lv_obj_set_style_bg_color(bar, c, 0);
+        lv_obj_set_style_bg_color(bar, COL_YELLOW, 0);
     }
 #else
     int u = (int)(util_pct + 0.5f);
@@ -925,13 +901,12 @@ static void set_reset_tick(lv_obj_t* tick, int reset_mins, int window_mins) {
         return;
     }
     lv_obj_clear_flag(tick, LV_OBJ_FLAG_HIDDEN);
-    int x = QUOTA_BAR_X + QUOTA_BAR_INSET
-          + (reset_mins * (QUOTA_BAR_INNER_W - RESET_TICK_W)
+    int x = QUOTA_BAR_X
+          + (reset_mins * (QUOTA_BAR_W - RESET_TICK_W)
              + window_mins / 2)
             / window_mins;
-    const int min_x = QUOTA_BAR_X + QUOTA_BAR_INSET;
-    if (x < min_x) x = min_x;
-    const int max_x = min_x + QUOTA_BAR_INNER_W - RESET_TICK_W;
+    if (x < QUOTA_BAR_X) x = QUOTA_BAR_X;
+    const int max_x = QUOTA_BAR_X + QUOTA_BAR_W - RESET_TICK_W;
     if (x > max_x) x = max_x;
     lv_obj_set_x(tick, x);
 }
