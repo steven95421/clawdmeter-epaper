@@ -37,12 +37,12 @@ static uint16_t rgb565(int r, int g, int b) {
 }
 
 static void test_classify_bwry() {
-    // Dark theme backgrounds -> WHITE paper (role inversion).
-    CHECK(classify_rgb565(rgb565(0, 0, 0)) == EPD_WHITE);        // BG  #000000
-    CHECK(classify_rgb565(rgb565(31, 31, 30)) == EPD_WHITE);     // PANEL ~#1f1f1e
-    // Light foreground -> BLACK ink.
-    CHECK(classify_rgb565(rgb565(250, 249, 245)) == EPD_BLACK);  // TEXT  #faf9f5
-    CHECK(classify_rgb565(rgb565(120, 140, 93)) == EPD_BLACK);   // GREEN low-usage
+    // 黑底白字：暗色主题背景映射为 BLACK 墨色。
+    CHECK(classify_rgb565(rgb565(0, 0, 0)) == EPD_BLACK);        // BG  #000000
+    CHECK(classify_rgb565(rgb565(31, 31, 30)) == EPD_BLACK);     // PANEL ~#1f1f1e
+    // 亮色前景映射为 WHITE 纸色，形成反白文字。
+    CHECK(classify_rgb565(rgb565(250, 249, 245)) == EPD_WHITE);  // TEXT  #faf9f5
+    CHECK(classify_rgb565(rgb565(120, 140, 93)) == EPD_WHITE);   // GREEN low-usage
     // Warm inks survive by hue.
     CHECK(classify_rgb565(rgb565(192, 57, 43)) == EPD_RED);      // RED   high-usage
     CHECK(classify_rgb565(rgb565(220, 160, 40)) == EPD_YELLOW);  // amber accent

@@ -388,17 +388,10 @@ static lv_obj_t* make_pill(lv_obj_t* parent, const char* text) {
     // (light fill, dark text in LVGL) so it renders as a solid BLACK pill
     // with WHITE "Current"/"Weekly" text on the panel.
 #ifdef BOARD_EPAPER_154G
-    // 4-colour BWRY panel: a solid RED pill with WHITE "Current"/"Weekly"
-    // text. COL_RED classifies to RED ink and COL_BG (black in LVGL) maps to
-    // WHITE on the panel, so this is the colourful signature alongside the
-    // red logo and title — no muddy yellow involved.
+    // 154G 扁平双服务方版式不会调用此分支；若启用，COL_RED 仍为红墨，
+    // COL_BG 文字映射为黑墨，COL_TEXT 边框映射为白纸。
     lv_obj_set_style_bg_color(lbl, COL_RED, 0);
     lv_obj_set_style_text_color(lbl, COL_BG, 0);
-    // Black outline around the rounded (LV_RADIUS_CIRCLE) red pill — COL_TEXT
-    // classifies to BLACK ink. 2px is enough now that the classifier's blue
-    // gate folds the red/border anti-alias fringe into BLACK rather than a
-    // yellow halo: the converted fringe effectively thickens the ring inward,
-    // so a thin 2px border still reads as a solid, continuous outline.
     lv_obj_set_style_border_color(lbl, COL_TEXT, 0);
     lv_obj_set_style_border_width(lbl, 2, 0);
     lv_obj_set_style_border_opa(lbl, LV_OPA_COVER, 0);

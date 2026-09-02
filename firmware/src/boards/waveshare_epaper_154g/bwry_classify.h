@@ -29,18 +29,9 @@
 #define EPD_DITHER_ORANGE 0xFE
 #endif
 
-// ---- RGB565 -> 2-bit BWRY classifier (hue + luminance, role-inverting) ----
-// The shared UI is a DARK theme (light text on near-black bg), natural on
-// AMOLED but inverted for paper-white e-paper. We map by ROLE: dark
-// backgrounds -> WHITE paper, light text -> BLACK ink. Warm foreground inks
-// are caught by hue first so the real RED (high usage / disconnected) and
-// YELLOW (medium usage / status accent) survive instead of collapsing to ink.
-// Verified against the theme tokens:
-//   BG 0x000000 / PANEL 0x1f1f1e / BAR_BG 0x2a2a28  (lum 0/30/40)  -> WHITE
-//   TEXT 0xfaf9f5 / DIM 0xb0aea5                     (lum 249/175) -> BLACK
-//   GREEN 0x788c5d  (low usage, lum 128)                           -> BLACK
-//   AMBER/ACCENT 0xd97757 (medium usage / status)                  -> YELLOW
-//   RED 0xc0392b   (high usage / disconnected)                     -> RED
+// ---- RGB565 -> 2-bit BWRY 分类器（色相 + 亮度）----
+// 灰阶主题值：BG/PANEL/BAR_BG（亮度 0/30/40）-> BLACK；TEXT/DIM/GREEN（亮度 249/175/128）-> WHITE。
+// 暖色主题值：AMBER/ACCENT -> YELLOW；RED -> RED；橙色档位 -> EPD_DITHER_ORANGE。
 static inline uint8_t classify_rgb565(uint16_t p) {
     uint8_t r = ((p >> 11) & 0x1F) << 3;   // 0..248
     uint8_t g = ((p >>  5) & 0x3F) << 2;   // 0..252
@@ -53,20 +44,13 @@ static inline uint8_t classify_rgb565(uint16_t p) {
         return EPD_DITHER_ORANGE;
     // Warm (red-dominant) foreground -> RED, or YELLOW when green is also high.
     if (r >= 100 && r > g + 40 && r > b + 40) {
-        // True yellow pigment has LOW blue (0xf5c518 -> b=24). A warm pixel
-        // with HIGH blue is a desaturated RED+near-white blend — the anti-alias
-        // fringe where the red pill fill meets its light "black" border
-        // (COL_TEXT). Without this guard those mid-blends classify YELLOW and
-        // paint a yellow halo that breaks the rounded black outline ("gaps").
-        // Low blue -> real YELLOW; low green -> RED; otherwise fall through to
-        // the luminance branch, where these high-blue fringes resolve to solid
-        // BLACK and the outline stays continuous.
+        // 真黄的蓝分量低（0xf5c518 -> b=24）；高蓝暖色是 RED 与近白色的过渡像素，不应误判为 YELLOW。
+        // 低蓝返回 YELLOW，低绿返回 RED，其余交给亮度分支。
         if (g >= 90 && b < 80) return EPD_YELLOW;
         if (g < 90)            return EPD_RED;
     }
-    // Greyscale: luminance inversion. Bright (text/icons) -> black ink; dark
-    // (bg/panel/bar-track) -> white paper. Threshold 64 sits between the
-    // darkest foreground and the lightest background of the theme palette.
+    // 灰阶直接映射面板明暗：亮色（文字/图标）-> 白纸，暗色（背景/面板/轨道）-> 黑墨。
+    // 阈值 64 位于主题中最亮背景和最暗前景之间。
     uint32_t lum = ((uint32_t)r * 77 + (uint32_t)g * 150 + (uint32_t)b * 29) >> 8;
-    return (lum >= 64) ? EPD_BLACK : EPD_WHITE;
+    return (lum >= 64) ? EPD_WHITE : EPD_BLACK;
 }
