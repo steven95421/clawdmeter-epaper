@@ -869,10 +869,6 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
     // Retain the value in the hidden label so the data binding stays shared
     // with other boards; the 154G face communicates it solely through the bar.
     lv_label_set_text_fmt(pct_lbl, "%d", rem);
-    // Text stays high-contrast except for an actionable low-quota warning. The
-    // yellow core is quota, red hairline is reset time, and red text is the
-    // only low-budget warning. Keeping those roles stable reduces visual noise.
-    lv_obj_set_style_text_color(pct_lbl, rem < 25 ? COL_RED : COL_TEXT, 0);
     if (bar) {
         if (rem == 0) {
             lv_obj_add_flag(bar, LV_OBJ_FLAG_HIDDEN);
@@ -883,7 +879,12 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
             if (fill_w > QUOTA_BAR_W) fill_w = QUOTA_BAR_W;
             lv_obj_set_width(bar, fill_w);
         }
-        lv_obj_set_style_bg_color(bar, COL_YELLOW, 0);
+        // Native-ink state colour on the same flat geometry: black is healthy,
+        // yellow needs attention, red is critical.
+        lv_color_t c = (rem > 50)  ? COL_TEXT
+                     : (rem >= 25) ? COL_YELLOW
+                                   : COL_RED;
+        lv_obj_set_style_bg_color(bar, c, 0);
     }
 #else
     int u = (int)(util_pct + 0.5f);
@@ -894,7 +895,8 @@ static void set_usage_metric(lv_obj_t* pct_lbl, lv_obj_t* bar, float util_pct) {
 }
 
 #ifdef BOARD_EPAPER_154G
-static void set_reset_tick(lv_obj_t* tick, int reset_mins, int window_mins) {
+static void set_reset_tick(lv_obj_t* tick, int reset_mins, int window_mins,
+                           float util_pct) {
     if (!tick) return;
     if (reset_mins < 0 || window_mins <= 0) {
         lv_obj_add_flag(tick, LV_OBJ_FLAG_HIDDEN);
@@ -909,6 +911,11 @@ static void set_reset_tick(lv_obj_t* tick, int reset_mins, int window_mins) {
     const int max_x = QUOTA_BAR_X + QUOTA_BAR_W - RESET_TICK_W;
     if (x > max_x) x = max_x;
     lv_obj_set_x(tick, x);
+
+    // The cursor stays red on healthy/warning bars. On a critical red bar it
+    // flips to black, preserving the two independent readings.
+    int rem = 100 - (int)(util_pct + 0.5f);
+    lv_obj_set_style_bg_color(tick, rem < 25 ? COL_TEXT : COL_RED, 0);
 }
 #endif
 
@@ -931,7 +938,8 @@ void ui_update(const UsageData* data) {
     char buf[48];
     set_usage_metric(lbl_session_pct, bar_session, data->session_pct);
 #ifdef BOARD_EPAPER_154G
-    set_reset_tick(lbl_session_reset, data->session_reset_mins, 300);
+    set_reset_tick(lbl_session_reset, data->session_reset_mins, 300,
+                   data->session_pct);
 #else
     format_reset_time(data->session_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_session_reset, buf);
@@ -939,7 +947,8 @@ void ui_update(const UsageData* data) {
 
     set_usage_metric(lbl_weekly_pct, bar_weekly, data->weekly_pct);
 #ifdef BOARD_EPAPER_154G
-    set_reset_tick(lbl_weekly_reset, data->weekly_reset_mins, 10080);
+    set_reset_tick(lbl_weekly_reset, data->weekly_reset_mins, 10080,
+                   data->weekly_pct);
 #else
     format_reset_time(data->weekly_reset_mins, buf, sizeof(buf));
     lv_label_set_text(lbl_weekly_reset, buf);
@@ -962,12 +971,14 @@ void ui_update(const UsageData* data) {
     set_usage_metric(lbl_codex_session_pct, bar_codex_session,
                      data->codex_session_pct);
     set_reset_tick(lbl_codex_session_reset,
-                   data->codex_session_reset_mins, 300);
+                   data->codex_session_reset_mins, 300,
+                   data->codex_session_pct);
 
     set_usage_metric(lbl_codex_weekly_pct, bar_codex_weekly,
                      data->codex_weekly_pct);
     set_reset_tick(lbl_codex_weekly_reset,
-                   data->codex_weekly_reset_mins, 10080);
+                   data->codex_weekly_reset_mins, 10080,
+                   data->codex_weekly_pct);
 #endif
 }
 
