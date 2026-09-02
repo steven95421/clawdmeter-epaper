@@ -619,10 +619,24 @@ async def main() -> None:
     gaps: list = []                    # recent sleep durations (disconnect -> next wake), recent last
     announced: str | None     = None   # log mode transitions once, not per scan
     skip_addr: str | None     = None   # macOS: a peripheral to skip for one cycle
+    bluetooth_radio_unavailable = False  # 蓝牙扫描故障日志只记录状态变化
     prev_mono = prev_wall = None       # for macOS system-sleep (monotonic-freeze) detection
     last_fed: dict = {}                # board address -> when we last fed it (fairness)
     while not stop_event.is_set():
-        targets = await discover_targets(skip_addr=skip_addr)
+        try:
+            targets = await discover_targets(skip_addr=skip_addr)
+        except BleakError as error:
+            # Mac 睡眠/唤醒会让蓝牙模块短暂不可用；按本轮未发现设备处理，
+            # 并交给现有扫描调度重试。
+            targets = []
+            if not bluetooth_radio_unavailable:
+                log(f"Bluetooth radio unavailable ({error}); "
+                    "transient failure, will retry")
+                bluetooth_radio_unavailable = True
+        else:
+            if bluetooth_radio_unavailable:
+                log("Bluetooth radio available again; discovery resumed")
+                bluetooth_radio_unavailable = False
         skip_addr = None
 
         if not targets:
