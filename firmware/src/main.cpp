@@ -44,6 +44,8 @@ RTC_DATA_ATTR static UsageData saved_usage = {};
 // "Refresh only if changed" is gated by the RTC-persisted frame hash in
 // display.cpp, so an unchanged wake costs no ~15 s refresh and no flash.
 extern "C" void board_enter_deep_sleep(uint32_t wake_min);  // waveshare_epaper_154g/power.cpp
+extern "C" int board_battery_mv(void);                        // smoothed ADC-derived pack voltage
+extern "C" int board_battery_estimated_pct(void);             // OCV estimate, no icon hysteresis
 bool display_hal_idle(void);                                // waveshare_epaper_154g/display.cpp
 
 #define NAP_WAKE_INTERVAL_MIN   15   // deep-sleep wake cadence (minutes); tunable for battery vs freshness
@@ -296,6 +298,19 @@ static void check_serial_cmd() {
                 }
 #else
                 send_screenshot();
+#endif
+#ifdef BOARD_EPAPER_154G
+            } else if (strcmp(cmd_buf, "battery") == 0) {
+                // A command can only arrive while USB serial is present. The
+                // board schematic exposes BAT_ADC but not the ETA6098 STAT
+                // output to the MCU, so report measured facts and explicitly
+                // avoid claiming battery presence or charging state.
+                nap_serial_qa_hold_until_ms = millis() + 120000UL;
+                Serial.printf(
+                    "{\"battery_mv\":%d,\"estimated_pct\":%d,"
+                    "\"icon_pct\":%d,\"status\":\"voltage_only\"}\n",
+                    board_battery_mv(), board_battery_estimated_pct(),
+                    power_hal_battery_pct());
 #endif
             }
             cmd_pos = 0;

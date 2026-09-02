@@ -125,6 +125,19 @@ int  power_hal_battery_pct(void) { return cached_pct; }
 bool power_hal_is_charging(void) { return false; }   // no charge-status pin broken out
 bool power_hal_is_vbus_in(void)  { return true; }     // keep idle SM awake (see top-of-file)
 
+// Board-private diagnostics used by main.cpp's serial `battery` command. Keep
+// the millivolts and the un-hysterised estimate separate from cached_pct:
+// cached_pct is intentionally sticky within an icon bucket to avoid needless
+// e-paper refreshes, while these values are meant for calibration/debugging.
+extern "C" int board_battery_mv(void) {
+    return ema_init ? (int)(ema_mv + 0.5f) : -1;
+}
+
+extern "C" int board_battery_estimated_pct(void) {
+    const int mv = board_battery_mv();
+    return mv >= 0 ? mv_to_pct(mv) : -1;
+}
+
 bool power_hal_pwr_pressed(void) {
     if (pwr_pressed_flag) { pwr_pressed_flag = false; return true; }
     return false;
