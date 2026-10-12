@@ -21,6 +21,7 @@ import sys
 import time
 import traceback
 from pathlib import Path
+from typing import NoReturn
 
 import httpx
 from bleak import BleakClient, BleakScanner
@@ -176,9 +177,98 @@ def save_address(addr: str) -> None:
     SAVED_ADDR_FILE.write_text(addr)
 
 
+# Reuse one scanner: with bleak 1.1.1 each new BleakScanner left one
+# CoreBluetooth manager alive (19,250 in this process on 2026-10-12).
+_scanner: BleakScanner | None = None
+_scan_timeouts = 0                      # consecutive start/stop timeouts
+_radio_down_since: float | None = None  # first time we saw the radio unavailable
+SCAN_CONTROL_TIMEOUT = 5.0              # start/stop normally take well under 1 s
+STATE_POLL = 0.5                        # radio state check interval during a scan
+MAX_SCAN_TIMEOUTS = 3
+RADIO_DOWN_EXIT_AFTER = 30 * 60         # longer than launchd's 20 min bluetoothd throttle
+
+
+def _exit_for_restart(reason: str) -> NoReturn:
+    """Exit so the restart agent starts a clean process with a new manager."""
+    log(f"{reason}; exiting so the restart agent starts a clean process")
+    raise SystemExit(1)
+
+
+def _cb_delegate(scanner: BleakScanner):
+    """macOS: bleak's CentralManagerDelegate behind the scanner; None if unknown."""
+    if sys.platform != "darwin":
+        return None
+    return getattr(getattr(scanner, "_backend", None), "_manager", None)
+
+
+def _radio_ready(scanner: BleakScanner) -> bool:
+    """False while the shared manager is not powered on; True if we can't check."""
+    central = getattr(_cb_delegate(scanner), "central_manager", None)
+    if central is None:
+        return True
+    from CoreBluetooth import CBManagerStatePoweredOn
+
+    return central.state() == CBManagerStatePoweredOn
+
+
+async def _sleep_while_ready(scanner: BleakScanner, seconds: float) -> bool:
+    """Sleep ``seconds``; False as soon as a check finds the radio not powered on."""
+    end = time.monotonic() + seconds
+    while True:
+        left = end - time.monotonic()
+        if left <= 0:
+            return True
+        await asyncio.sleep(min(STATE_POLL, left))
+        if not _radio_ready(scanner):
+            return False
+
+
+async def scan_devices(timeout: float) -> list:
+    """Scan for ``timeout`` seconds with the shared scanner; return the BLEDevices.
+
+    Raises BleakError while the radio is unavailable; the caller retries.
+    """
+    global _scanner, _scan_timeouts, _radio_down_since
+    if _scanner is None:
+        _scanner = BleakScanner()  # raises BleakError while Bluetooth is off
+    if not _radio_ready(_scanner):
+        now = time.monotonic()
+        if _radio_down_since is None:
+            _radio_down_since = now
+        elif now - _radio_down_since > RADIO_DOWN_EXIT_AFTER:
+            _exit_for_restart(f"Bluetooth not powered on for {RADIO_DOWN_EXIT_AFTER // 60} min")
+        raise BleakError("Bluetooth is not powered on")
+    _radio_down_since = None
+    stayed_ready = False
+    cancelled = False
+    try:
+        try:
+            await asyncio.wait_for(_scanner.start(), SCAN_CONTROL_TIMEOUT)
+            # A reset during the scan invalidates the peripherals it found.
+            stayed_ready = await _sleep_while_ready(_scanner, timeout)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            try:
+                await asyncio.wait_for(_scanner.stop(), SCAN_CONTROL_TIMEOUT)
+            except asyncio.TimeoutError:
+                if not cancelled:  # a stop timeout must not hide the cancel
+                    raise
+    except asyncio.TimeoutError:
+        _scan_timeouts += 1
+        if _scan_timeouts >= MAX_SCAN_TIMEOUTS:
+            _exit_for_restart(f"Scanner start/stop timed out {_scan_timeouts} times in a row")
+        raise BleakError("scanner start/stop timed out") from None
+    _scan_timeouts = 0
+    if not stayed_ready or not _radio_ready(_scanner):
+        raise BleakError("Bluetooth reset during the scan")
+    return _scanner.discovered_devices
+
+
 async def scan_for_device() -> str | None:
     log(f"Scanning for '{DEVICE_NAME}' ({SCAN_TIMEOUT}s)...")
-    devices = await BleakScanner.discover(timeout=SCAN_TIMEOUT)
+    devices = await scan_devices(SCAN_TIMEOUT)
     for d in devices:
         if d.name == DEVICE_NAME:
             log(f"Found: {d.address}")
@@ -199,22 +289,18 @@ async def scan_for_device() -> str | None:
 # connects to it directly without scanning. CoreBluetooth shares the single
 # physical link, so this rides the existing HID connection — the keyboard
 # keeps working.
-_cb_manager = None  # reused CentralManagerDelegate (CoreBluetooth)
 _cb_fastpath_broken = False  # set once if the macOS system-connected fast-path is unusable
 
 
-async def _get_cb_manager():
-    """Lazily create and ready a shared CoreBluetooth central manager."""
-    global _cb_manager
-    if _cb_manager is None:
-        from bleak.backends.corebluetooth.CentralManagerDelegate import (
-            CentralManagerDelegate,
-        )
-
-        mgr = CentralManagerDelegate()
-        await mgr.wait_until_ready()  # raises if Bluetooth is unauthorized/off
-        _cb_manager = mgr
-    return _cb_manager
+def _get_cb_manager():
+    """The shared scanner's CoreBluetooth delegate (a second manager would leak, see _scanner)."""
+    global _scanner
+    if _scanner is None:
+        _scanner = BleakScanner()  # raises BleakError while Bluetooth is off
+    manager = _cb_delegate(_scanner)
+    if manager is None:
+        raise AttributeError("BleakScanner has no CoreBluetooth manager")
+    return manager
 
 
 async def retrieve_connected_macos(skip_addr: str | None = None):
@@ -241,12 +327,16 @@ async def retrieve_connected_macos(skip_addr: str | None = None):
     from bleak.backends.device import BLEDevice
 
     try:
-        manager = await _get_cb_manager()
-    except Exception as e:  # e.g. bleak 1.x dropped CentralManagerDelegate.wait_until_ready
+        manager = _get_cb_manager()
+    except BleakError:
+        raise  # Bluetooth is off; the main loop logs it and retries
+    except Exception as e:  # e.g. bleak internals changed
         log(f"CoreBluetooth system-connected fast-path unavailable ({e}); "
             f"using scan-by-name for the rest of this run")
         _cb_fastpath_broken = True
         return None
+    if not _radio_ready(_scanner):
+        return None  # scan_devices() reports the radio state
 
     cm = manager.central_manager
 
@@ -303,7 +393,7 @@ async def discover_targets(skip_addr: str | None = None) -> list:
         if dev is not None:
             targets.append(dev)
         seen = {target_addr(t) for t in targets}
-        for d in await BleakScanner.discover(timeout=SCAN_TIMEOUT):
+        for d in await scan_devices(SCAN_TIMEOUT):
             if d.name != DEVICE_NAME or d.address in seen or d.address == skip_addr:
                 continue
             seen.add(d.address)
@@ -703,6 +793,8 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
+    except SystemExit as e:  # _exit_for_restart()
+        exit_code = e.code if isinstance(e.code, int) else 1
     except Exception:
         # os._exit() below skips normal finalization, so Python would never
         # print this traceback on its own — log it ourselves and exit non-zero
