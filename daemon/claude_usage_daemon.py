@@ -57,6 +57,8 @@ CODEX_CACHE_TTL = 120.0
 # keeps development builds and nonstandard installs possible without editing
 # this file.
 CODEX_BIN_CANDIDATES = (
+    # Newer ChatGPT.app builds (seen 2026-10) bundle the CLI in codex-cli/bin.
+    Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/bin/codex"),
     Path("/Applications/ChatGPT.app/Contents/Resources/codex"),
     Path("/Applications/Codex.app/Contents/Resources/codex"),
 )
